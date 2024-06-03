@@ -6,10 +6,12 @@ from typing import Any, Union, Tuple, List
 
 
 def fixShapeAndIFFT(sig):
-    sig_r = torch.zeros(32,400,400,320, dtype=torch.complex64)
-    sig_r[:, :, 50:350, 1:320] = sig
+    sig_r = torch.zeros(32,400,320,400, dtype=torch.complex64)
+    #sig_r.
+    sig_r[:, 50:350, 1:320, :] = sig
+    
 
-    for nc in range(sig.shape[0]):
+    for nc in range(sig_r.shape[0]):
         sig_r[nc] = torch.fft.fftshift(torch.fft.ifft(torch.fft.ifft(torch.fft.ifft(torch.fft.fftshift(sig_r[nc], dim=(0,1,2)), dim=0), dim=1), dim=2), dim=(0,1,2))
 
     return sig_r
@@ -26,20 +28,16 @@ def reshape_fortran(x, shape):
 #     reg_pinv = torch.linalg.pinv(M @ M.conj().T + regularizer)
 #     return reg_pinv
 
-def pinv_linalg(A, lmda=1e-2, cuda=False, lanczos=True):
+def pinv_linalg(A, lmda=1e-2):
     #TODO: Let user select backeng (numpy, scipy, torch (cuda or not))
-    if cuda:
-        A = A.cuda()
     AA = A.conj().T@A
     S = torch.linalg.eigvalsh(AA)[-1].item() # Largest eigenvalue
     lambda_sq = (lmda**2) * abs(S)
-    I = torch.eye(AA.shape[0], dtype=A.dtype)
+    I = torch.eye(AA.shape[0], dtype=A.dtype, device=A.device)
 
     regularized_matrix = AA + I * lambda_sq
 
-    A_pinv = torch.linalg.solve(regularized_matrix, A.conj().T)
-    return A_pinv.cpu() if cuda else A_pinv
-
+    return torch.linalg.solve(regularized_matrix, A.conj().T)
 
 
 def grappa3D(
@@ -95,26 +93,33 @@ def grappa3D(
         #                  Kernel estimation                   #
         ########################################################
         if verbose:
-            print("Kernel estimation...")
+            print("GRAPPA Kernel estimation...")
 
+        blocks = acs.unfold(dimension=1, size=sbly, step=1)
+        blocks = blocks.unfold(dimension=2, size=sblz, step=1)
+        blocks = blocks.unfold(dimension=3, size=sblx, step=1)
+        blocks = blocks.permute(-1,-2,-3,0,1,2,3)
 
-        windows = acs.unfold(dimension=1, size=sbly, step=1)
-        windows = windows.unfold(dimension=2, size=sblz, step=1)
-        windows = windows.unfold(dimension=3, size=sblx, step=1)
-        windows = windows.permute(-1,-2,-3,0,1,2,3)
-
-        src = windows[idxs_src.permute(2,1,0)].reshape(nc*nsp, -1)
-        tgs = windows[idxs_tgs.permute(2,1,0)].reshape(nc*tbly*tblz*tblx, -1)
+        src = blocks[idxs_src.permute(2,1,0)].reshape(nc*nsp, -1)
+        tgs = blocks[idxs_tgs.permute(2,1,0)].reshape(nc*tbly*tblz*tblx, -1)
         
-        if cuda:
-            grappa_kernel = tgs @ pinv_linalg(src.T, cuda=cuda).T
+        src = src.cuda() if cuda else src
+        tgs = tgs.cuda() if cuda else tgs
+
+        grappa_kernel = tgs @ pinv_linalg(src.T).T
+
+        del src, tgs, blocks
 
     ########################################################
     #                  Kernel application                  #
     ########################################################
 
+    #src_t = torch.load("src_true.torch")
+    #tgs_t = torch.load("tgs_true.torch")
+    #grappa_k_true = torch.load("grappa_kernel_true.torch")
+
     grappa_kernel = reshape_fortran(grappa_kernel, (nc * tbly * tblz, nc * nsp // sblx, sblx))
-    grappa_conv = torch.zeros(nc * tbly * tblz, nc * nsp // sblx, nx, dtype=sig.dtype, device=sig.device)
+    grappa_conv = torch.zeros(nc * tbly * tblz, nc * nsp // sblx, nx, dtype=sig.dtype, device=grappa_kernel.device)
     start_idx = nx // 2 - sblx // 2
     end_idx = start_idx + sblx
 
@@ -125,25 +130,29 @@ def grappa3D(
 
     if nx > 1:
         grappa_conv = torch.fft.ifftshift(torch.fft.ifft(torch.fft.fftshift(grappa_conv, dim=-1), dim=-1), dim=-1)
-        sig = torch.cat((sig[:, -af:, :, :], sig, sig[:, :af, :, :]), dim=1)
+        sig = torch.cat((sig[:, -total_af:, :, :], sig, sig[:, :total_af, :, :]), dim=1)
     
     if nz > 1:
-        sig = torch.cat((sig[:, :, -2*af:, :], sig, sig[:, :, :2*af, :]), dim=2)
+        sig = torch.cat((sig[:, :, -2*total_af:, :], sig, sig[:, :, :2*total_af, :]), dim=2)
 
     shift_y=2
-    sig_tmp = torch.zeros_like(sig).cuda()
+    rec = torch.zeros_like(sig)
     np = int(sum(idxs_srcT))
 
-    y_ival = range(shift_y, ny+2-af-sbly, afy)
-    z_ival = range(0, nz+4*af-sblz, afz)
-    grappa_conv = grappa_conv.cuda()
+    #TODO: Overpadding here
+    y_ival = range(shift_y, ny+2*total_af-sbly, af[0])
+    z_ival = range(0, nz+4*total_af-sblz, af[1])
 
+    if verbose:
+        print("GRAPPA Reconstruction...")
+        
     for y in tqdm(y_ival):
-        acq_y = sig[:, y:y+sbly, :, :].cuda()
+        acq_y = sig[:, y:y+sbly, :, :]
+        if cuda: acq_y = acq_y.cuda()
         for z in z_ival:
             acq = reshape_fortran(acq_y[:,:,z:z+sblz, :], (nc, sbly*sblz, nx))
             acq = reshape_fortran(acq[:, idxs_srcT, :], (nc*np,1, nx))
-            sig_tmp[:,y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, :] =  reshape_fortran(
+            rec[:,y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, :] =  reshape_fortran(
                                                                         torch.bmm(
                                                                             grappa_conv.permute(2,0,1),
                                                                             acq.permute(2,0,1)
@@ -151,6 +160,9 @@ def grappa3D(
                                                                         (nc, tbly, tblz, nx)
                                                                     )
 
-    if cuda:
-        sig_tmp = sig_tmp.cpu()
-    return sig_tmp
+    if cuda: rec = rec.cpu()
+    rec = rec[:, total_af:ny+total_af, 2*total_af:nz+2*total_af,:]
+    rec = nx*torch.fft.fftshift(torch.fft.fft(torch.fft.fftshift(rec, dim=-1), dim=-1), dim=-1)
+    rec = fixShapeAndIFFT(rec)
+
+    return rec
