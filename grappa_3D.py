@@ -1,58 +1,12 @@
 import torch
 import math
-import numpy as np
 
+from utils import pinv_linalg, reshape_fortran
 from tqdm import tqdm
-from typing import Any, Union, Tuple, List
+from typing import Union
 
 
-def fixShapeAndIFFT(sig, scan):
-    sz = sig.shape
-    trg_sz = [sig.shape[0], int(scan.hdr.Meas.iRoFTLength)//2, int(scan.hdr.Meas.iPEFTLength), int(scan.hdr.Meas.i3DFTLength)]
-    diff_sz = np.array(trg_sz) - np.array(sz)
-    shift = np.floor(diff_sz / 2).astype(int)
-
-    ixin1 = np.maximum(shift, 0)
-    ixin2 = np.maximum(shift, 0) + np.minimum(sz, trg_sz)
-    ixout1 = np.abs(np.minimum(shift, 0))
-    ixout2 = np.abs(np.minimum(shift, 0)) + np.minimum(sz, trg_sz)
-
-    sig_r = np.zeros(trg_sz, dtype=sig.dtype)
-
-    sig_r[:, ixin1[1]:ixin2[1], ixin1[2]:ixin2[2], ixin1[3]:ixin2[3]] = sig[:, ixout1[1]:ixout2[1], ixout1[2]:ixout2[2], ixout1[3]:ixout2[3]]
-
-    for nc in range(sig_r.shape[0]):
-        sig_r[nc] = np.fft.fftshift(np.fft.ifft(np.fft.ifft(np.fft.ifft(np.fft.fftshift(sig_r[nc], axes=(0,1,2)), axis=0), axis=1), axis=2), axes=(0,1,2))
-
-    return sig_r
-
-
-def reshape_fortran(x, shape):
-    if len(x.shape) > 0:
-        x = x.permute(*reversed(range(len(x.shape))))
-    return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))
-
-
-def pinv(M, lmda=1e-6):
-    MM = M @ M.conj().T 
-    S = torch.linalg.eigvalsh(MM)[-1].item() 
-    regularizer = (lmda**2) * abs(S) * torch.eye(M.shape[0], device=M.device)
-    reg_pinv = torch.linalg.pinv(MM + regularizer)
-    return reg_pinv
-
-def pinv_linalg(A, lmda=1e-2):
-    #TODO: Let user select backeng (numpy, scipy, torch (cuda or not))
-    AA = A.conj().T@A
-    S = torch.linalg.eigvalsh(AA)[-1].item() # Largest eigenvalue
-    lambda_sq = (lmda**2) * abs(S)
-    I = torch.eye(AA.shape[0], dtype=A.dtype, device=A.device)
-
-    regularized_matrix = AA + I * lambda_sq
-
-    return torch.linalg.solve(regularized_matrix, A.conj().T)
-
-
-def grappaND(
+def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
@@ -117,7 +71,7 @@ def grappaND(
 
         src = blocks[idxs_src.permute(2,1,0)].reshape(nc*nsp, -1)
         tgs = blocks[idxs_tgs.permute(2,1,0)].reshape(nc*tbly*tblz*tblx, -1)
-        
+
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
