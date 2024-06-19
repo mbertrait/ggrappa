@@ -131,7 +131,9 @@ def GRAPPA_Recon(
             blocks = blocks.permute(3,0,1,2,4)
             cur_batch_sz = blocks.shape[0]
             blocks = blocks.reshape(cur_batch_sz, nc, -1)[..., idxs_src].cuda()
-            rec[:,y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, xpos:-xpos] =  (blocks.reshape(cur_batch_sz, -1) @ grappa_kernel).reshape(cur_batch_sz, nc, tbly, tblz).permute(1,2,3,0)
+            rec[:, y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, xpos:-xpos] = (blocks.reshape(cur_batch_sz, -1) @ grappa_kernel) \
+                                                                         .reshape(cur_batch_sz, nc, tbly, tblz) \
+                                                                         .permute(1,2,3,0)
 
     if cuda: rec = rec.cpu()
     rec[abs(sig) != 0] = sig[abs(sig) != 0] # Data consistency : some people do it others don't, need to check benefits or drawbacks on recon.
