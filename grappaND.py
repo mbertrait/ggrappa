@@ -10,8 +10,9 @@ def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
-        cuda=True,
-        verbose=True,
+        grappa_kernel: torch.Tensor = None,
+        cuda: bool = True,
+        verbose: bool = True,
 ) -> torch.Tensor:
     """Perform GRAPPA reconstruction.
 
@@ -26,10 +27,12 @@ def GRAPPA_Recon(
         Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
     af : Union[list[int], tuple[int, ...]]
         Acceleration factors. [afy, afz]
-    cuda : bool
-        Wether to use GPU for GRAPPA application or not.
-    verbose : bool
-        Activate verbose mode (printing) or not.
+    grappa_kernel : torch.Tensor, optional
+        GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
+    cuda : bool, optional
+        Whether to use GPU or not. Default: `True`.
+    verbose : bool, optional
+        Activate verbose mode (printing) or not. Default: `True`.
     """
 
     #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
@@ -126,11 +129,13 @@ def GRAPPA_Recon(
     idxs_src = idxs_src.flatten()
 
     for y in tqdm(y_ival):
+        sig_y = sig[:, y:y+sbly]
+        if cuda: sig_y = sig_y.cuda()
         for z in z_ival:
-            blocks = sig[:,y:y+sbly, z:z+sblz, :].unfold(dimension=3, size=sblx, step=1)
+            blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=3, size=sblx, step=1)
             blocks = blocks.permute(3,0,1,2,4)
             cur_batch_sz = blocks.shape[0]
-            blocks = blocks.reshape(cur_batch_sz, nc, -1)[..., idxs_src].cuda()
+            blocks = blocks.reshape(cur_batch_sz, nc, -1)[..., idxs_src]
             rec[:, y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, xpos:-xpos] = (blocks.reshape(cur_batch_sz, -1) @ grappa_kernel) \
                                                                          .reshape(cur_batch_sz, nc, tbly, tblz) \
                                                                          .permute(1,2,3,0)
