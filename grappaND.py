@@ -1,7 +1,7 @@
 import torch
 import math
 
-from utils import pinv_linalg, reshape_fortran
+from utils import pinv, pinv_linalg
 from tqdm import tqdm
 from typing import Union
 
@@ -10,21 +10,35 @@ def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
-        block_size=None,
-        grappa_kernel=None,
         cuda=True,
         verbose=True,
-        kcenter=None
 ) -> torch.Tensor:
+    """Perform GRAPPA reconstruction.
 
-    #TODO: If the acs is not provided: extract it from sig
+    For now only cartesian regular undersampling (no CAIPI) is supported.
+    For now acs must be provided, in the future it will be deduced from sig.
+
+    Parameters
+    ----------
+    sig : torch.Tensor
+        Complex 4D Tensor of shape: (nc, ky, kz, kx) 
+    acs : torch.Tensor
+        Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
+    af : Union[list[int], tuple[int, ...]]
+        Acceleration factors. [afy, afz]
+    cuda : bool
+        Wether to use GPU for GRAPPA application or not.
+    verbose : bool
+        Activate verbose mode (printing) or not.
+    """
+
+    #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
+    #TODO: If the acs is not provided: extract it from sig (trivial)
     
     nc, ny, nz, nx = sig.shape
     acsny, acsnz, acsnx = acs.shape[1:]
 
     total_af = math.prod(af)
-
-    #TODO: Might need to do checks on arguments passed to the function
 
     # Generate the acceleration pattern
     #TODO: Will need to think about `block_size` argument that can be given by the user
@@ -48,7 +62,6 @@ def GRAPPA_Recon(
 
     idxs_src = (pat[:sbly, :sblz] == 1)
     idxs_src = idxs_src.unsqueeze(-1).expand(*idxs_src.size(), sblx)
-    idxs_srcT = (pat[:sbly, :sblz].T == 1).flatten()
 
     idxs_tgs = torch.zeros(sbly, sblz, sblx)
     idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = 1
@@ -64,78 +77,63 @@ def GRAPPA_Recon(
         if verbose:
             print("GRAPPA Kernel estimation...")
 
+        # Keep an eye on torch.nn.Unfold (and its functionnal) for 3D sliding block support
+        # for future replacement.
+        # https://pytorch.org/docs/stable/generated/torch.nn.Unfold.html
+        # https://pytorch.org/docs/stable/generated/torch.nn.functional.unfold.html
         blocks = acs.unfold(dimension=1, size=sbly, step=1)
         blocks = blocks.unfold(dimension=2, size=sblz, step=1)
         blocks = blocks.unfold(dimension=3, size=sblx, step=1)
-        blocks = blocks.permute(-1,-2,-3,0,1,2,3)
+        blocks = blocks.flatten(start_dim=-3)
 
-        src = blocks[idxs_src.permute(2,1,0)].reshape(nc*nsp, -1)
-        tgs = blocks[idxs_tgs.permute(2,1,0)].reshape(nc*tbly*tblz*tblx, -1)
+        src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
+        tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, tbly*tblz*tblx)
+
+        src = src.permute(1,0,-1).reshape(-1, nc*nsp)
+        tgs = tgs.permute(1,0,-1).reshape(-1, nc*tbly*tblz*tblx)
 
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
-        grappa_kernel = tgs @ pinv_linalg(src.T).T
-        #grappa_kernel = tgs @ src.T @ pinv(src)
-
+        #grappa_kernel = pinv(src) @ src.H @ tgs
+        grappa_kernel = (tgs.T @ pinv_linalg(src).T).T
         del src, tgs, blocks
 
     ########################################################
     #                  Kernel application                  #
     ########################################################
 
-    grappa_kernel = reshape_fortran(grappa_kernel, (nc * tbly * tblz, nc * nsp // sblx, sblx))
-    grappa_conv = torch.zeros(nc * tbly * tblz, nc * nsp // sblx, nx, dtype=sig.dtype, device=grappa_kernel.device)
-    start_idx = nx // 2 - sblx // 2
-    end_idx = start_idx + sblx
+    shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
+    shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
 
-    grappa_conv[:, :, start_idx:end_idx] = torch.flip(grappa_kernel, [2])
-    
-    if sblx>1:
-        sig = torch.fft.ifftshift(torch.fft.ifft(torch.fft.fftshift(sig, dim=-1), dim=-1), dim=-1)
-
-    if nx > 1:
-        grappa_conv = torch.fft.ifftshift(torch.fft.ifft(torch.fft.fftshift(grappa_conv, dim=-1), dim=-1), dim=-1)
+    if ny > 1:
         sig = torch.cat((sig[:, -total_af:, :, :], sig, sig[:, :total_af, :, :]), dim=1)
     
     if nz > 1:
         sig = torch.cat((sig[:, :, -2*total_af:, :], sig, sig[:, :, :2*total_af, :]), dim=2)
 
-    if kcenter:
-        shift_y = (kcenter[0] - 1) % af[0]
-        shift_z = (kcenter[1] - 1) % af[1]
-    else:
-        shift_y = 2
-        shift_z = 0
-
+    if nx > 1:
+        sig = torch.cat((sig[:, :, :,-total_af:], sig, sig[:, :, :, :total_af]), dim=3)
 
     rec = torch.zeros_like(sig)
-    np = int(sum(idxs_srcT))
 
-    #TODO: Overpadding here to fix (from MATLAB)
     y_ival = range(shift_y, ny+2*total_af-sbly, af[0])
     z_ival = range(shift_z, nz+4*total_af-sblz, af[1])
 
     if verbose:
         print("GRAPPA Reconstruction...")
-    
-    # TODO: Add batch size here being a multiple of sbly
+
+    idxs_src = idxs_src.flatten()
+
     for y in tqdm(y_ival):
-        acq_y = sig[:, y:y+sbly, :, :]
-        if cuda: acq_y = acq_y.cuda()
         for z in z_ival:
-            acq = reshape_fortran(acq_y[:,:,z:z+sblz, :], (nc, sbly*sblz, nx))
-            acq = reshape_fortran(acq[:, idxs_srcT, :], (nc*np,1, nx))
-            rec[:,y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, :] =  reshape_fortran(
-                                                                        torch.bmm(
-                                                                            grappa_conv.permute(2,0,1),
-                                                                            acq.permute(2,0,1)
-                                                                        ).permute(1,2,0),
-                                                                        (nc, tbly, tblz, nx)
-                                                                    )
+            blocks = sig[:,y:y+sbly, z:z+sblz, :].unfold(dimension=3, size=sblx, step=1)
+            blocks = blocks.permute(3,0,1,2,4)
+            cur_batch_sz = blocks.shape[0]
+            blocks = blocks.reshape(cur_batch_sz, nc, -1)[..., idxs_src].cuda()
+            rec[:,y+ypos:y+ypos+tbly, z+zpos:z+zpos+tblz, xpos:-xpos] =  (blocks.reshape(cur_batch_sz, -1) @ grappa_kernel).reshape(cur_batch_sz, nc, tbly, tblz).permute(1,2,3,0)
 
     if cuda: rec = rec.cpu()
+    rec[abs(sig) != 0] = sig[abs(sig) != 0] # Data consistency : some people do it others don't, need to check benefits or drawbacks on recon.
     rec = rec[:, total_af:ny+total_af, 2*total_af:nz+2*total_af,:]
-    rec = nx*torch.fft.fftshift(torch.fft.fft(torch.fft.fftshift(rec, dim=-1), dim=-1), dim=-1)
-
     return rec
