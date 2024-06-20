@@ -126,10 +126,8 @@ def GRAPPA_Recon(
     rec = torch.zeros_like(sig)
 
     size_chunk_y = math.ceil(sbly + sbly*(batch_size-1)/af[0])
-    #y_ival = range(shift_y, ny+2*total_af-sbly, af[0])
     y_ival = range(shift_y, ny+2*total_af-sbly, size_chunk_y)
     z_ival = range(shift_z, nz+4*total_af-sblz, af[1])
-    #x_ival = range(0, nx+2*total_af-sblx, sblx)
 
     if verbose:
         print("GRAPPA Reconstruction...")
@@ -150,8 +148,17 @@ def GRAPPA_Recon(
                                                                                         .reshape(cur_batch_sz_y,cur_batch_sz_x, nc, tbly, tblz) \
                                                                                         .permute(2,0,3,4,1) \
                                                                                         .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+        del sig_y
+        torch.cuda.empty_cache()
 
     rec[abs(sig) != 0] = sig[abs(sig) != 0] # Data consistency : some people do it others don't, need to check benefits or drawbacks on recon.
-    rec = rec[:, total_af:ny+total_af, 2*total_af:nz+2*total_af,:]
+    if ny > 1:
+        rec = rec[:,total_af:-total_af]
+    
+    if nz > 1:
+        rec = rec[...,2*total_af:-2*total_af,:]
+
+    if nx > 1:
+        rec = rec[...,total_af:-total_af]
 
     return rec
