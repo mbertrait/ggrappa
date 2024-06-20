@@ -1,1 +1,1 @@
-# GRAPPA 3D
+# GRAPPA ND
