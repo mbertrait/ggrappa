@@ -1,7 +1,7 @@
 import torch
 import math
 
-from utils import pinv, pinv_linalg
+from .utils import pinv, pinv_linalg
 from tqdm import tqdm
 from typing import Union
 
@@ -10,16 +10,34 @@ def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
-        batch_size=100,
-        block_size=None,
-        grappa_kernel=None,
-        cuda=True,
-        verbose=True,
-        kcenter=None
+        batch_size: int = 100,
+        grappa_kernel: torch.Tensor = None,
+        cuda: bool = True,
+        verbose: bool = True,
 ) -> torch.Tensor:
+    """Perform GRAPPA reconstruction.
 
-    #TODO: URGENT: Support of 2D-CAPIRINHA undersmapling pattern 
-    #TODO: If the acs is not provided: extract it from sig
+    For now only cartesian regular undersampling (no CAIPI) is supported.
+    For now acs must be provided, in the future it will be deduced from sig.
+
+    Parameters
+    ----------
+    sig : torch.Tensor
+        Complex 4D Tensor of shape: (nc, ky, kz, kx) 
+    acs : torch.Tensor
+        Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
+    af : Union[list[int], tuple[int, ...]]
+        Acceleration factors. [afy, afz]
+    grappa_kernel : torch.Tensor, optional
+        GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
+    cuda : bool, optional
+        Whether to use GPU or not. Default: `True`.
+    verbose : bool, optional
+        Activate verbose mode (printing) or not. Default: `True`.
+    """
+
+    #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
+    #TODO: If the acs is not provided: extract it from sig (trivial)
     
     nc, ny, nz, nx = sig.shape
     acsny, acsnz, acsnx = acs.shape[1:]
@@ -128,9 +146,12 @@ def GRAPPA_Recon(
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            rec[:,y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:-xpos] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel).reshape(cur_batch_sz_y,cur_batch_sz_x, nc, tbly, tblz).permute(2,0,3,4,1).reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+            rec[:,y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:-xpos] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
+                                                                                        .reshape(cur_batch_sz_y,cur_batch_sz_x, nc, tbly, tblz) \
+                                                                                        .permute(2,0,3,4,1) \
+                                                                                        .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
 
-    rec[abs(sig) != 0] = sig[abs(sig) != 0]
+    rec[abs(sig) != 0] = sig[abs(sig) != 0] # Data consistency : some people do it others don't, need to check benefits or drawbacks on recon.
     rec = rec[:, total_af:ny+total_af, 2*total_af:nz+2*total_af,:]
 
     return rec
