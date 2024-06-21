@@ -7,12 +7,6 @@ def rss(data, axis=0):
     return np.sqrt(np.sum(np.abs(data)**2, axis=axis))
 
 
-def reshape_fortran(x, shape):
-    if len(x.shape) > 0:
-        x = x.permute(*reversed(range(len(x.shape))))
-    return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))
-
-
 def pinv(M, lmda=1e-6):
     MM = M.H @ M
     S = torch.linalg.eigvalsh(MM)[-1].item()
