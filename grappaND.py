@@ -10,8 +10,9 @@ def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
+        kernel_size: Union[list[int], tuple[int, ...]] = (3,3,7),
         batch_size: int = 100,
-        grappa_kernel: torch.Tensor = None,
+        grappa_weights: torch.Tensor = None,
         cuda: bool = True,
         verbose: bool = True,
 ) -> torch.Tensor:
@@ -28,7 +29,9 @@ def GRAPPA_Recon(
         Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
     af : Union[list[int], tuple[int, ...]]
         Acceleration factors. [afy, afz]
-    grappa_kernel : torch.Tensor, optional
+    kernel_size : Union[list[int], tuple[int, ...]]
+        GRAPPA kernel size
+    grappa_weights : torch.Tensor, optional
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
     cuda : bool, optional
         Whether to use GPU or not. Default: `True`.
@@ -38,9 +41,27 @@ def GRAPPA_Recon(
 
     #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
     #TODO: If the acs is not provided: extract it from sig (trivial)
-    
+    if len(af) == 1:
+        af = [af[0], 1]
+
+    if len(sig.shape) == 3: # 2D multicoil
+        sig = sig[:, :, None, :]
+        acs = acs[:, :, None, :]
+        if len(af) == 2:
+            af = [af[0], 1]
+
     nc, ny, nz, nx = sig.shape
     acsny, acsnz, acsnx = acs.shape[1:]
+
+    print("GRAPPA Kernel size: ", kernel_size)
+
+    if kernel_size:
+        pat = torch.zeros([((k-1) * af[i] + 1) for i, k in enumerate(kernel_size[:2])])
+    else:
+        pat = torch.zeros((3*total_af if af[0] > 1 else 1, 3*total_af if af[1] > 1 else 1))
+
+    slices = [slice(None, None, a) for a in af]
+    pat[tuple(slices)] = 1
 
     total_af = math.prod(af)
 
@@ -48,19 +69,20 @@ def GRAPPA_Recon(
 
     # Generate the acceleration pattern
     #TODO: Will need to think about `block_size` argument that can be given by the user
-    pat = torch.zeros((3*total_af,) * len(af))
-    slices = [slice(None, None, a) for a in af]
-    pat[tuple(slices)] = 1
 
     # Determine the target block size from total_af
-    tbly = int(total_af/sum(pat[:total_af, 0]))
-    tblz = int(total_af/sum(pat[0, :total_af]))
-    tblx=1
+    tbly = af[0]
+    tblz = af[1]
+    tblx = 1
 
     # Determine 3D source block size
-    sblx = min(7, acsnx)
-    sbly = min(max(total_af, 3*tbly), acsny)
-    sblz = min(max(total_af, 3*tblz), acsnz)
+    #sblx = min(7, acsnx)
+    #sbly = min(max(total_af, 3*tbly), acsny)
+    #sblz = min(max(total_af, 3*tblz), acsnz)
+
+    sbly = min(pat.shape[0], acsny)
+    sblz = min(pat.shape[1], acsnz)
+    sblx = min(kernel_size[-1], acsnx)
 
     xpos = (sblx-1)//2
     ypos = (sbly-tbly)//2
@@ -93,16 +115,15 @@ def GRAPPA_Recon(
         blocks = blocks.flatten(start_dim=-3)
 
         src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
-        tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, tbly*tblz*tblx)
+        tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
 
         src = src.permute(1,0,-1).reshape(-1, nc*nsp)
-        tgs = tgs.permute(1,0,-1).reshape(-1, nc*tbly*tblz*tblx)
+        tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
 
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
-        #grappa_kernel = pinv(src) @ src.H @ tgs
-        grappa_kernel = (tgs.T @ pinv_linalg(src).T).T
+        grappa_weights = pinv(src) @ src.H @ tgs
         del src, tgs, blocks
         torch.cuda.empty_cache()
 
@@ -112,23 +133,16 @@ def GRAPPA_Recon(
 
     shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
     shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
-
-    if ny > 1:
-        sig = torch.cat((sig[:, -total_af:, :, :], sig, sig[:, :total_af, :, :]), dim=1)
-    
-    if nz > 1:
-        sig = torch.cat((sig[:, :, -2*total_af:, :], sig, sig[:, :, :2*total_af, :]), dim=2)
-
-    if nx > 1:
-        sig = torch.cat((sig[:, :, :,-total_af:], sig, sig[:, :, :, :total_af]), dim=3)
+        
+    sig = torch.nn.functional.pad(sig,  (tblx * (tblx > 1), tblx * (tblx > 1),
+                                         tblz * (tblz > 1), tblz * (tblz > 1),
+                                         tbly * (tbly > 1), tbly * (tbly > 1)))
 
     rec = torch.zeros_like(sig)
 
     size_chunk_y = math.ceil(sbly + sbly*(batch_size-1)/af[0])
-    #y_ival = range(shift_y, ny+2*total_af-sbly, af[0])
-    y_ival = range(shift_y, ny+2*total_af-sbly, size_chunk_y)
-    z_ival = range(shift_z, nz+4*total_af-sblz, af[1])
-    #x_ival = range(0, nx+2*total_af-sblx, sblx)
+    y_ival = range(shift_y, rec.shape[1] - sbly, size_chunk_y)
+    z_ival = range(shift_z, rec.shape[2] - sblz, af[1])
 
     if verbose:
         print("GRAPPA Reconstruction...")
@@ -145,19 +159,21 @@ def GRAPPA_Recon(
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            rec[:,y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:-xpos] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
-                                                                                        .reshape(cur_batch_sz_y,cur_batch_sz_x, nc, tbly, tblz) \
-                                                                                        .permute(2,0,3,4,1) \
-                                                                                        .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+            rec[:, y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:xpos+tblx*cur_batch_sz_x] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_weights) \
+                                                                                                            .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz) \
+                                                                                                            .permute(2,0,3,4,1) \
+                                                                                                            .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+        del sig_y
+        torch.cuda.empty_cache()
 
-    rec[abs(sig) != 0] = sig[abs(sig) != 0] # Data consistency : some people do it others don't, need to check benefits or drawbacks on recon.
+    rec[abs(sig) != 0] = sig[abs(sig) != 0]
     if ny > 1:
-        rec = rec[:,total_af:-total_af]
+        rec = rec[:, ypos:-(sbly-ypos-tbly)]
     
     if nz > 1:
-        rec = rec[...,2*total_af:-2*total_af,:]
+        rec = rec[...,zpos:-(sblz-zpos-tblz),:]
 
     if nx > 1:
-        rec = rec[...,total_af:-total_af]
+        rec = rec[...,xpos:-(sblx-xpos-tblx)]
 
     return rec
