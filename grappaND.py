@@ -97,7 +97,7 @@ def GRAPPA_Recon(
 
     nsp = idxs_src.sum()
 
-    if grappa_kernel is None:
+    if grappa_weights is None:
 
         ########################################################
         #                  Kernel estimation                   #
