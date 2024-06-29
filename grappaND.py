@@ -97,7 +97,7 @@ def GRAPPA_Recon(
 
     nsp = idxs_src.sum()
 
-    if grappa_weights is None:
+    if grappa_kernel is None:
 
         ########################################################
         #                  Kernel estimation                   #
@@ -123,7 +123,8 @@ def GRAPPA_Recon(
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
-        grappa_weights = pinv(src) @ src.H @ tgs
+        grappa_kernel = pinv(src) @ src.H @ tgs
+
         del src, tgs, blocks
         torch.cuda.empty_cache()
 
@@ -133,45 +134,46 @@ def GRAPPA_Recon(
 
     shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
     shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
-        
-    sig = torch.nn.functional.pad(sig,  (tblx * (tblx > 1), tblx * (tblx > 1),
-                                         tblz * (tblz > 1), tblz * (tblz > 1),
-                                         tbly * (tbly > 1), tbly * (tbly > 1)))
+
+    sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
+                                        (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
+                                        (af[0] - ypos)%tbly + ypos, (sbly-ypos-tbly)))
 
     rec = torch.zeros_like(sig)
 
-    size_chunk_y = math.ceil(sbly + sbly*(batch_size-1)/af[0])
+    size_chunk_y = math.ceil(sbly + tbly*(batch_size - 1))
     y_ival = range(shift_y, rec.shape[1] - sbly, size_chunk_y)
-    z_ival = range(shift_z, rec.shape[2] - sblz, af[1])
+    z_ival = range(shift_z, max(rec.shape[2] - sblz, 1), tblz)
 
     if verbose:
         print("GRAPPA Reconstruction...")
     
     idxs_src = idxs_src.flatten()
 
-    for y in tqdm(y_ival):
-        sig_y = sig[:,y:y+sbly+af[0]*(batch_size - 1)]
-        if cuda:
-            sig_y = sig_y.cuda()
-        for z in tqdm(z_ival):
-            blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=af[0]).unfold(dimension=3, size=sblx, step=1)
+    for y in tqdm(y_ival, disable=not verbose):
+        sig_y = sig[:,y:y+sbly+tbly*(batch_size - 1)]
+        if cuda: sig_y = sig_y.cuda()
+        for z in tqdm(z_ival, disable=not verbose):
+            blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=tbly).unfold(dimension=3, size=sblx, step=tblx)
             blocks = blocks.permute(1,3,0,4,2,5)
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            rec[:, y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:xpos+tblx*cur_batch_sz_x] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_weights) \
-                                                                                                            .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz) \
-                                                                                                            .permute(2,0,3,4,1) \
-                                                                                                            .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+            rec[:,
+                y+ypos:y+ypos+tbly*cur_batch_sz_y,
+                z+zpos:z+zpos+tblz,
+                xpos:xpos+tblx*cur_batch_sz_x] = (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
+                                                 .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz) \
+                                                 .permute(2,0,3,4,1) \
+                                                 .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
         del sig_y
-        torch.cuda.empty_cache()
+        if cuda: torch.cuda.empty_cache()
 
-    rec[abs(sig) != 0] = sig[abs(sig) != 0]
     if ny > 1:
-        rec = rec[:, ypos:-(sbly-ypos-tbly)]
+        rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
     
     if nz > 1:
-        rec = rec[...,zpos:-(sblz-zpos-tblz),:]
+        rec = rec[...,(af[1] - zpos)%tblz + zpos:-(sblz-zpos-tblz),:]
 
     if nx > 1:
         rec = rec[...,xpos:-(sblx-xpos-tblx)]
