@@ -7,12 +7,6 @@ def rss(data, axis=0):
     return np.sqrt(np.sum(np.abs(data)**2, axis=axis))
 
 
-def reshape_fortran(x, shape):
-    if len(x.shape) > 0:
-        x = x.permute(*reversed(range(len(x.shape))))
-    return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))
-
-
 def pinv(M, lmda=1e-6):
     MM = M.H @ M
     S = torch.linalg.eigvalsh(MM)[-1].item()
@@ -23,7 +17,7 @@ def pinv(M, lmda=1e-6):
 
 def pinv_linalg(A, lmda=1e-2):
     AA = A.H@A
-    S = torch.linalg.eigvalsh(AA)[-1].item() # Largest eigenvalue
+    S = torch.linalg.eigvalsh(AA)[-1].item()
     lambda_sq = (lmda**2) * abs(S)
     I = torch.eye(AA.shape[0], dtype=A.dtype, device=A.device)
 
