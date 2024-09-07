@@ -10,12 +10,15 @@ def GRAPPA_Recon(
         sig: torch.Tensor,
         acs: torch.Tensor,
         af: Union[list[int], tuple[int, ...]],
-        kernel_size: Union[list[int], tuple[int, ...]] = (3,3,7),
-        batch_size: int = 100,
-        grappa_weights: torch.Tensor = None,
+        delta: int = 0,
+        kernel_size: Union[list[int], tuple[int, ...]] = (4,4,5),
+        lambda_=1e-4,
+        batch_size: int = 1,
+        grappa_kernel: torch.Tensor = None,
         cuda: bool = True,
         verbose: bool = True,
 ) -> torch.Tensor:
+
     """Perform GRAPPA reconstruction.
 
     For now only cartesian regular undersampling (no CAIPI) is supported.
@@ -29,16 +32,19 @@ def GRAPPA_Recon(
         Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
     af : Union[list[int], tuple[int, ...]]
         Acceleration factors. [afy, afz]
+    delta : int
+        For CAIPIRINHA undersampling pattern. Default: `0`.
     kernel_size : Union[list[int], tuple[int, ...]]
         GRAPPA kernel size
-    grappa_weights : torch.Tensor, optional
+    lambda_ : float
+        Regularization parameter of the pseudo-inverse.
+    grappa_kernel : torch.Tensor, optional
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
     cuda : bool, optional
         Whether to use GPU or not. Default: `True`.
     verbose : bool, optional
         Activate verbose mode (printing) or not. Default: `True`.
     """
-
     #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
     #TODO: If the acs is not provided: extract it from sig (trivial)
     if len(af) == 1:
@@ -46,14 +52,19 @@ def GRAPPA_Recon(
 
     if len(sig.shape) == 3: # 2D multicoil
         sig = sig[:, :, None, :]
-        acs = acs[:, :, None, :]
         if len(af) == 2:
             af = [af[0], 1]
+
+    if len(acs.shape) == 3:
+        acs = acs[:, :, None, :]
 
     nc, ny, nz, nx = sig.shape
     acsny, acsnz, acsnx = acs.shape[1:]
 
-    print("GRAPPA Kernel size: ", kernel_size)
+    if verbose:
+        print("GRAPPA Kernel size: ", kernel_size)
+        print("lmda: ", lmda)
+        print("batch size: ", batch_size)
 
     if kernel_size:
         pat = torch.zeros([((k-1) * af[i] + 1) for i, k in enumerate(kernel_size[:2])])
@@ -94,9 +105,12 @@ def GRAPPA_Recon(
     idxs_tgs = torch.zeros(sbly, sblz, sblx)
     idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = 1
     idxs_tgs = (idxs_tgs == 1)
+    #idxs_tgs = (idxs_tgs & ~idxs_src)
+    #idxs_tgs[idxs_src == 1] = 0
 
     nsp = idxs_src.sum()
 
+    #if grappa_kernel is None:
     if grappa_kernel is None:
 
         ########################################################
@@ -123,8 +137,8 @@ def GRAPPA_Recon(
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
-        grappa_kernel = pinv(src) @ src.H @ tgs
-
+        grappa_kernel = pinv(src, lmda=lmda) @ src.H @ tgs
+        #grappa_kernel = (tgs.T @ pinv_linalg(src).T).T
         del src, tgs, blocks
         torch.cuda.empty_cache()
 
@@ -135,14 +149,15 @@ def GRAPPA_Recon(
     shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
     shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
 
+
     sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
                                         (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
                                         (af[0] - ypos)%tbly + ypos, (sbly-ypos-tbly)))
 
     rec = torch.zeros_like(sig)
 
-    size_chunk_y = math.ceil(sbly + tbly*(batch_size - 1))
-    y_ival = range(shift_y, rec.shape[1] - sbly, size_chunk_y)
+    size_chunk_y = sbly + tbly*(batch_size - 1)
+    y_ival = range(shift_y, max(rec.shape[1] - sbly, 1), tbly*batch_size)
     z_ival = range(shift_z, max(rec.shape[2] - sblz, 1), tblz)
 
     if verbose:
@@ -151,31 +166,30 @@ def GRAPPA_Recon(
     idxs_src = idxs_src.flatten()
 
     for y in tqdm(y_ival, disable=not verbose):
-        sig_y = sig[:,y:y+sbly+tbly*(batch_size - 1)]
-        if cuda: sig_y = sig_y.cuda()
+        sig_y = sig[:,y:y+size_chunk_y]
+        if cuda:
+            sig_y = sig_y.cuda()
         for z in tqdm(z_ival, disable=not verbose):
             blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=tbly).unfold(dimension=3, size=sblx, step=tblx)
             blocks = blocks.permute(1,3,0,4,2,5)
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            rec[:,
-                y+ypos:y+ypos+tbly*cur_batch_sz_y,
-                z+zpos:z+zpos+tblz,
-                xpos:xpos+tblx*cur_batch_sz_x] = (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
-                                                 .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz) \
-                                                 .permute(2,0,3,4,1) \
-                                                 .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x)
+            rec[:, y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:xpos+tblx*cur_batch_sz_x] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
+                                                                                                            .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx) \
+                                                                                                            .permute(2,0,3,4,1,5) \
+                                                                                                            .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
+
         del sig_y
         if cuda: torch.cuda.empty_cache()
-
-    if ny > 1:
+    
+    if sbly > 1:
         rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
     
-    if nz > 1:
+    if sblz > 1:
         rec = rec[...,(af[1] - zpos)%tblz + zpos:-(sblz-zpos-tblz),:]
 
-    if nx > 1:
+    if sblx > 1:
         rec = rec[...,xpos:-(sblx-xpos-tblx)]
 
     return rec
