@@ -63,7 +63,7 @@ def GRAPPA_Recon(
 
     if verbose:
         print("GRAPPA Kernel size: ", kernel_size)
-        print("lmda: ", lmda)
+        print("lambda: ", lambda_)
         print("batch size: ", batch_size)
 
     if kernel_size:
@@ -137,7 +137,7 @@ def GRAPPA_Recon(
         src = src.cuda() if cuda else src
         tgs = tgs.cuda() if cuda else tgs
 
-        grappa_kernel = pinv(src, lmda=lmda) @ src.H @ tgs
+        grappa_kernel = pinv(src, lambda_) @ src.H @ tgs
         #grappa_kernel = (tgs.T @ pinv_linalg(src).T).T
         del src, tgs, blocks
         torch.cuda.empty_cache()
