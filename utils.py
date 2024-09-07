@@ -35,7 +35,7 @@ def pinv_batch(M, lambda_=1e-4, cuda=True):
     S = torch.linalg.eigvalsh(MM)[-1].item()
 
     MM = MM.cpu()
-    regularizer = (reg**2) * abs(S) * torch.eye(MM.shape[0], device=MM.device)
+    regularizer = (lambda_**2) * abs(S) * torch.eye(MM.shape[0], device=MM.device)
     del S
     torch.cuda.empty_cache()
     reg_pinv = torch.linalg.pinv(MM + regularizer)
