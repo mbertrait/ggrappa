@@ -1,7 +1,7 @@
 import torch
 import math
 
-from .utils import pinv, pinv_linalg
+from .utils import pinv, pinv_linalg, extract_acs
 from tqdm import tqdm
 from typing import Union
 
@@ -19,26 +19,26 @@ def GRAPPA_Recon(
         cuda_mode: str = "all",
         verbose: bool = True,
 ) -> torch.Tensor:
-
     """Perform GRAPPA reconstruction.
 
-    For now only cartesian regular undersampling (no CAIPI) is supported.
-    For now acs must be provided, in the future it will be deduced from sig.
+    /!\ For now only cartesian regular undersampling (no CAIPI) is supported.
 
     Parameters
     ----------
     sig : torch.Tensor
-        Complex 4D Tensor of shape: (nc, ky, kz, kx) 
+        Complex 4D Tensor of shape: (nc, ky, kz, kx).
     acs : torch.Tensor
-        Complex 4D Tensor of shape: (nc, acsky, acskz, acskx)
+        Complex 4D Tensor of shape: (nc, acsky, acskz, acskx).
     af : Union[list[int], tuple[int, ...]]
-        Acceleration factors. [afy, afz]
-    delta : int
+        Acceleration factors. [afy, afz].
+    delta : int, optional
         For CAIPIRINHA undersampling pattern. Default: `0`.
-    kernel_size : Union[list[int], tuple[int, ...]]
-        GRAPPA kernel size
-    lambda_ : float
+    kernel_size : Union[list[int], tuple[int, ...]], optional
+        GRAPPA kernel size. Default `(4,4,5)`
+    lambda_ : float, optional
         Regularization parameter of the pseudo-inverse.
+    batch_size : int, optional
+        Size of the batch of `windows` to process by iteration in the kernel application phase. Default: `1`.
     grappa_kernel : torch.Tensor, optional
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
     cuda : bool, optional
@@ -52,7 +52,6 @@ def GRAPPA_Recon(
         Activate verbose mode (printing) or not. Default: `True`.
     """
     #TODO: Support of 2D-CAIPIRINHA undersmapling pattern 
-    #TODO: If the acs is not provided: extract it from sig (trivial)
 
     if len(af) == 1:
         af = [af[0], 1]
