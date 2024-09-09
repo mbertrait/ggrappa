@@ -1,7 +1,7 @@
 import torch
 import math
 
-from .utils import pinv, pinv_linalg
+from .utils import pinv, pinv_linalg, extract_acs
 from tqdm import tqdm
 from typing import Union
 
@@ -45,8 +45,11 @@ def GRAPPA_Recon(
     verbose : bool, optional
         Activate verbose mode (printing) or not. Default: `True`.
     """
-    #TODO: Check support of 2D-CAIPIRINHA undersmapling pattern 
-    #TODO: If the acs is not provided: extract it from sig (trivial)
+    #TODO: Support of 2D-CAIPIRINHA undersmapling pattern 
+
+    if acs is None:
+        acs = extract_acs(sig)
+
     if len(af) == 1:
         af = [af[0], 1]
 
@@ -78,18 +81,10 @@ def GRAPPA_Recon(
 
     #TODO: Might need to do checks on arguments passed to the function
 
-    # Generate the acceleration pattern
-    #TODO: Will need to think about `block_size` argument that can be given by the user
-
     # Determine the target block size from total_af
     tbly = af[0]
     tblz = af[1]
     tblx = 1
-
-    # Determine 3D source block size
-    #sblx = min(7, acsnx)
-    #sbly = min(max(total_af, 3*tbly), acsny)
-    #sblz = min(max(total_af, 3*tblz), acsnz)
 
     sbly = min(pat.shape[0], acsny)
     sblz = min(pat.shape[1], acsnz)
@@ -105,12 +100,9 @@ def GRAPPA_Recon(
     idxs_tgs = torch.zeros(sbly, sblz, sblx)
     idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = 1
     idxs_tgs = (idxs_tgs == 1)
-    #idxs_tgs = (idxs_tgs & ~idxs_src)
-    #idxs_tgs[idxs_src == 1] = 0
 
     nsp = idxs_src.sum()
 
-    #if grappa_kernel is None:
     if grappa_kernel is None:
 
         ########################################################
@@ -130,7 +122,7 @@ def GRAPPA_Recon(
 
         src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
         tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
-
+        
         src = src.permute(1,0,-1).reshape(-1, nc*nsp)
         tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
 
@@ -145,6 +137,8 @@ def GRAPPA_Recon(
     ########################################################
     #                  Kernel application                  #
     ########################################################
+
+    grappa_kernel = grappa_kernel.cuda() if cuda else grappa_kernel
 
     shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
     shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
@@ -169,7 +163,8 @@ def GRAPPA_Recon(
         sig_y = sig[:,y:y+size_chunk_y]
         if cuda:
             sig_y = sig_y.cuda()
-        for z in tqdm(z_ival, disable=not verbose):
+        #for z in tqdm(z_ival, disable=not verbose):
+        for z in z_ival:
             blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=tbly).unfold(dimension=3, size=sblx, step=tblx)
             blocks = blocks.permute(1,3,0,4,2,5)
             cur_batch_sz_y = blocks.shape[0]
@@ -192,4 +187,4 @@ def GRAPPA_Recon(
     if sblx > 1:
         rec = rec[...,xpos:-(sblx-xpos-tblx)]
 
-    return rec
+    return rec, grappa_kernel
