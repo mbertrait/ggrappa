@@ -1,1 +1,1 @@
-# GRAPPA 3D
+# gGRAPPA: A generalized GRAPPA for MRI reconstruction
