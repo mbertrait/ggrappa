@@ -7,23 +7,20 @@ def rss(data, axis=0):
     return np.sqrt(np.sum(np.abs(data)**2, axis=axis))
 
 
-# def extract_acs(sig):
-#     nc, ky, kz, kx = sig.shape.
+def extract_acs(sig):
+    _, ky, kz, _ = sig.shape
     
-#     start_ky = ky // 2
-#     start_kz = kz // 2
-#     start_kx = kx // 2
+    start_ky = ky // 2
+    start_kz = kz // 2
 
-#     left_start_ky = sig[0,start_ky:,0,0].nonzero()
-#     left_end_ky = sig[0,:start_ky,0,0][::-1].nonzero()
+    left_start_ky = np.max(sig[0,start_ky:,0,0].nonzero())
+    left_end_ky = np.max(sig[0,:start_ky,0,0][::-1].nonzero())
 
-#     end_kz = start_kz + acs_kz
-#     end_kx = start_kx + acs_kx
+    left_start_kz = np.max(sig[0,0,start_kz:,0].nonzero())
+    left_end_kz = np.max(sig[0,0,:start_kz,0][::-1].nonzero())
+
+    return sig[:, left_start_ky:left_end_ky+1, left_start_kz:left_end_kz+1]
     
-#     acs_region = tensor[:, start_ky:end_ky, start_kz:end_kz, start_kx:end_kx]
-    
-#     return acs_region
-
 
 def pinv_batch(M, lambda_=1e-4, cuda=True):
     if cuda: M = M.cuda()
@@ -43,11 +40,16 @@ def pinv_batch(M, lambda_=1e-4, cuda=True):
     return reg_pinv
 
 def pinv(M, lambda_=1e-4):
-    MM = M.H @ M
+    if M.shape[0] >= M.shape[1]:
+        MM = M.H @ M
+        finalTranspose = False
+    else:
+        MM = M @ M.H
+        finalTranspose = True
     S = torch.linalg.eigvalsh(MM)[-1].item()
     regularizer = (lambda_**2) * abs(S) * torch.eye(MM.shape[0], device=M.device)
     reg_pinv = torch.linalg.pinv(MM + regularizer)
-    return reg_pinv
+    return reg_pinv.H if finalTranspose else reg_pinv
 
 
 def pinv_linalg_batch(A, lamdba_=1e-4, cuda=True):
