@@ -1,7 +1,7 @@
 import torch
 import math
 
-from .utils import pinv, pinv_linalg, extract_acs
+from .utils import pinv, pinv_linalg
 from tqdm import tqdm
 from typing import Union
 
@@ -12,10 +12,11 @@ def GRAPPA_Recon(
         af: Union[list[int], tuple[int, ...]],
         delta: int = 0,
         kernel_size: Union[list[int], tuple[int, ...]] = (4,4,5),
-        lambda_=1e-4,
+        lambda_: float = 1e-4,
         batch_size: int = 1,
         grappa_kernel: torch.Tensor = None,
         cuda: bool = True,
+        cuda_mode: str = "all",
         verbose: bool = True,
 ) -> torch.Tensor:
 
@@ -42,13 +43,16 @@ def GRAPPA_Recon(
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
     cuda : bool, optional
         Whether to use GPU or not. Default: `True`.
+    cuda_mode : str, optional
+        CUDA operation mode (GPU):
+            * "all" - Both kernel estimation and kernel application . Memory intensive.
+            * "estimation" - Only use CUDA for GRAPPA kernel estimation.
+            * "application" - Only use CUDA for GRAPPA kernel application.
     verbose : bool, optional
         Activate verbose mode (printing) or not. Default: `True`.
     """
     #TODO: Support of 2D-CAIPIRINHA undersmapling pattern 
-
-    if acs is None:
-        acs = extract_acs(sig)
+    #TODO: If the acs is not provided: extract it from sig (trivial)
 
     if len(af) == 1:
         af = [af[0], 1]
@@ -57,6 +61,9 @@ def GRAPPA_Recon(
         sig = sig[:, :, None, :]
         if len(af) == 2:
             af = [af[0], 1]
+    
+    if acs is None:
+        acs = extract_acs(sig)
 
     if len(acs.shape) == 3:
         acs = acs[:, :, None, :]
@@ -126,11 +133,11 @@ def GRAPPA_Recon(
         src = src.permute(1,0,-1).reshape(-1, nc*nsp)
         tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
 
-        src = src.cuda() if cuda else src
-        tgs = tgs.cuda() if cuda else tgs
+        src = src.cuda() if cuda and cuda_mode in ["all", "estimation"] else src
+        tgs = tgs.cuda() if cuda and cuda_mode in ["all", "estimation"] else tgs
 
         grappa_kernel = pinv(src, lambda_) @ src.H @ tgs
-        #grappa_kernel = (tgs.T @ pinv_linalg(src).T).T
+
         del src, tgs, blocks
         torch.cuda.empty_cache()
 
@@ -138,7 +145,7 @@ def GRAPPA_Recon(
     #                  Kernel application                  #
     ########################################################
 
-    grappa_kernel = grappa_kernel.cuda() if cuda else grappa_kernel
+    grappa_kernel = grappa_kernel.cuda() if cuda and cuda_mode in ["all", "application"] else grappa_kernel
 
     shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
     shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
@@ -161,9 +168,7 @@ def GRAPPA_Recon(
 
     for y in tqdm(y_ival, disable=not verbose):
         sig_y = sig[:,y:y+size_chunk_y]
-        if cuda:
-            sig_y = sig_y.cuda()
-        #for z in tqdm(z_ival, disable=not verbose):
+        sig_y = sig_y.cuda() if cuda and cuda_mode in ["all", "application"] else sig_y
         for z in z_ival:
             blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=tbly).unfold(dimension=3, size=sblx, step=tblx)
             blocks = blocks.permute(1,3,0,4,2,5)
