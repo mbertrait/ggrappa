@@ -91,6 +91,7 @@ def pinv_linalg(A, lamdba_=1e-4):
         AA = A.H@A
     S = torch.linalg.eigvalsh(AA)[-1].item()
     lambda_sq = (lamdba_**2) * abs(S)
+
     I = torch.eye(AA.shape[0], dtype=A.dtype, device=A.device)
 
     regularized_matrix = AA + I * lambda_sq
