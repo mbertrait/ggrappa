@@ -1,9 +1,12 @@
 import torch
 import math
+import logging
 
-from .utils import pinv, pinv_linalg, extract_acs
+from .utils import pinv, extract_acs, get_indices_from_mask
 from tqdm import tqdm
 from typing import Union
+
+logger = logging.getLogger(__name__)
 
 
 def GRAPPA_Recon(
@@ -15,9 +18,9 @@ def GRAPPA_Recon(
         lambda_: float = 1e-4,
         batch_size: int = 1,
         grappa_kernel: torch.Tensor = None,
+        mask: torch.Tensor = None,
         cuda: bool = True,
-        cuda_mode: str = "all",
-        verbose: bool = True,
+        cuda_mode: str = "all"
 ) -> torch.Tensor:
     """Perform GRAPPA reconstruction.
 
@@ -32,7 +35,7 @@ def GRAPPA_Recon(
     af : Union[list[int], tuple[int, ...]]
         Acceleration factors. [afy, afz].
     delta : int, optional
-        For CAIPIRINHA undersampling pattern. Default: `0`.
+        For CAIPIRINHA undersampling pattern. WIP. Default: `0`.
     kernel_size : Union[list[int], tuple[int, ...]], optional
         GRAPPA kernel size. Default `(4,4,5)`
     lambda_ : float, optional
@@ -41,6 +44,8 @@ def GRAPPA_Recon(
         Size of the batch of `windows` to process by iteration in the kernel application phase. Default: `1`.
     grappa_kernel : torch.Tensor, optional
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
+    mask : torch.Tensor, optional
+        Binary mask for masked kernel application. Shape: (ky, kz, kx).
     cuda : bool, optional
         Whether to use GPU or not. Default: `True`.
     cuda_mode : str, optional
@@ -48,10 +53,8 @@ def GRAPPA_Recon(
             * "all" - Both kernel estimation and kernel application . Memory intensive.
             * "estimation" - Only use CUDA for GRAPPA kernel estimation.
             * "application" - Only use CUDA for GRAPPA kernel application.
-    verbose : bool, optional
-        Activate verbose mode (printing) or not. Default: `True`.
     """
-    #TODO: Support of 2D-CAIPIRINHA undersmapling pattern 
+    #TODO: Support of 2D-CAIPIRINHA undersampling pattern 
 
     if len(af) == 1:
         af = [af[0], 1]
@@ -61,19 +64,22 @@ def GRAPPA_Recon(
         if len(af) == 2:
             af = [af[0], 1]
     
-    if acs is None:
-        acs = extract_acs(sig)
+    if grappa_kernel is None:
+        if acs is None:
+            acs = extract_acs(sig)
 
-    if len(acs.shape) == 3:
-        acs = acs[:, :, None, :]
+        if len(acs.shape) == 3:
+            acs = acs[:, :, None, :]
+    
+    if mask is not None:
+        assert sig.shape[1:] == mask.shape
 
-    nc, ny, nz, nx = sig.shape
+    nc = sig.shape[0]
     acsny, acsnz, acsnx = acs.shape[1:]
 
-    if verbose:
-        print("GRAPPA Kernel size: ", kernel_size)
-        print("lambda: ", lambda_)
-        print("batch size: ", batch_size)
+    logger.debug("GRAPPA Kernel size: ", kernel_size)
+    logger.debug("lambda: ", lambda_)
+    logger.debug("batch size: ", batch_size)
 
     if kernel_size:
         pat = torch.zeros([((k-1) * af[i] + 1) for i, k in enumerate(kernel_size[:2])])
@@ -114,8 +120,7 @@ def GRAPPA_Recon(
         ########################################################
         #                  Kernel estimation                   #
         ########################################################
-        if verbose:
-            print("GRAPPA Kernel estimation...")
+        logger.info("GRAPPA Kernel estimation...")
 
         # Keep an eye on torch.nn.Unfold (and its functionnal) for 3D sliding block support
         # for future replacement.
@@ -146,8 +151,16 @@ def GRAPPA_Recon(
 
     grappa_kernel = grappa_kernel.cuda() if cuda and cuda_mode in ["all", "application"] else grappa_kernel
 
-    shift_y = (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
-    shift_z = (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
+    if mask is not None:
+        sig_ = sig
+        left, size = get_indices_from_mask(mask)
+        sig = (sig*mask)[...,left[0]:left[0]+size[0],
+                             left[1]:left[1]+size[1],
+                             left[2]:left[2]+size[2]]
+        
+
+    shift_y = 0 if mask is not None else (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
+    shift_z = 0 if mask is not None else (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
 
 
     sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
@@ -160,12 +173,12 @@ def GRAPPA_Recon(
     y_ival = range(shift_y, max(rec.shape[1] - sbly, 1), tbly*batch_size)
     z_ival = range(shift_z, max(rec.shape[2] - sblz, 1), tblz)
 
-    if verbose:
-        print("GRAPPA Reconstruction...")
+    logger.info("GRAPPA Reconstruction...")
     
     idxs_src = idxs_src.flatten()
 
-    for y in tqdm(y_ival, disable=not verbose):
+    #for y in tqdm(y_ival, disable=not verbose):
+    for y in tqdm(y_ival):
         sig_y = sig[:,y:y+size_chunk_y]
         sig_y = sig_y.cuda() if cuda and cuda_mode in ["all", "application"] else sig_y
         for z in z_ival:
@@ -190,5 +203,23 @@ def GRAPPA_Recon(
 
     if sblx > 1:
         rec = rec[...,xpos:-(sblx-xpos-tblx)]
+    
+    if mask is not None:
+        rec *= mask[left[0]:left[0]+size[0],
+                    left[1]:left[1]+size[1],
+                    left[2]:left[2]+size[2]]
+
+        not_mask = (~mask) if mask.dtype == torch.bool else (1 - mask)
+        
+        sig_[...,left[0]:left[0]+size[0],
+                 left[1]:left[1]+size[1],
+                 left[2]:left[2]+size[2]] = (sig_ * not_mask)[...,left[0]:left[0]+size[0],
+                                                                  left[1]:left[1]+size[1],
+                                                                  left[2]:left[2]+size[2]] + rec
+        
+        rec = sig_
+
+
+    logger.info("GRAPPA Reconstruction...")
 
     return rec, grappa_kernel
