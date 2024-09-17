@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import nibabel as nib
 
 
 def rss(data, axis=0):

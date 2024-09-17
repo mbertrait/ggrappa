@@ -24,7 +24,7 @@ def GRAPPA_Recon(
         cuda_mode: str = "all",
         quiet=False,
 ) -> torch.Tensor:
-    """Perform GRAPPA reconstruction.
+    """Performs GRAPPA reconstruction.
 
     Parameters
     ----------
@@ -91,7 +91,7 @@ def GRAPPA_Recon(
         pat[y,cnt::af[1]] = 1
         cnt = (cnt+delta)%af[1]
 
-    tbly = af[0]*(af[1]//delta)
+    tbly = af[0] * (1 if delta == 0 else af[1]//delta)
     tblz = af[1]
     tblx = 1
 
@@ -159,7 +159,7 @@ def GRAPPA_Recon(
 
     sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
                                         (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
-                                        (af[0]*(af[1]//delta) - ypos)%tbly + ypos, (sbly-ypos-tbly)))
+                                        (af[0] * (1 if delta == 0 else af[1]//delta) - ypos)%tbly + ypos, (sbly-ypos-tbly)))
 
     rec = torch.zeros_like(sig)
 
@@ -181,10 +181,12 @@ def GRAPPA_Recon(
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            rec[:, y+ypos:y+ypos+tbly*cur_batch_sz_y, z+zpos:z+zpos+tblz, xpos:xpos+tblx*cur_batch_sz_x] =  (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
-                                                                                                            .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx) \
-                                                                                                            .permute(2,0,3,4,1,5) \
-                                                                                                            .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
+            rec[:,  y+ypos:y+ypos+tbly*cur_batch_sz_y,
+                    z+zpos:z+zpos+tblz,
+                    xpos:xpos+tblx*cur_batch_sz_x]  =   (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
+                                                        .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx) \
+                                                        .permute(2,0,3,4,1,5) \
+                                                        .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
 
         del sig_y
         if cuda: torch.cuda.empty_cache()
