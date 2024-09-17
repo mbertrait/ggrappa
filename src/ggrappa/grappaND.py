@@ -84,7 +84,7 @@ def GRAPPA_Recon(
     logger.debug("batch size: ", batch_size)
 
     if kernel_size:
-        pat = torch.zeros([((k-1) * af[i]*[1, (af[1]//delta)][i==0] + 1) for i, k in enumerate(kernel_size[:2])])
+        pat = torch.zeros([((k-1) * af[i]*[1, (1 if delta == 0 else af[1]//delta)][i==0] + 1) for i, k in enumerate(kernel_size[:2])])
 
     cnt=0
     for y in range(0, pat.shape[0], af[0]):

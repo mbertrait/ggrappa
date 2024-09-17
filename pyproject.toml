@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gGRAPPA"  # Replace with your project name
+version = "0.1.0"
+description = "gGRAPPA provides an easy to use tool to perform generalized GRAPPA reconstructions on kspace data."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Maxime Bertrait", email = "maxime.bertrait@cea.fr" }
+]
+
+dependencies = [
+  "numpy>=1.26.4",
+  "torch>=2.3.0",
+  "tqdm=4.66.4"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/mbertrait/ggrappa"
+"Bug Reports" = "https://github.com/mbertrait/ggrappa/issues"
+"Source" = "https://github.com/mbertrait/ggrappa"
+
+[tool.setuptools]
+packages = ["ggrappa"]
+package-dir = {"" = "src"}
