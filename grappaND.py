@@ -1,12 +1,10 @@
 import torch
-import numpy as np
-import math
 import logging
 
-from .utils import pinv, extract_acs, get_indices_from_mask
 from tqdm import tqdm
 from typing import Union
-from torch.nn.functional import pad
+
+from .utils import pinv, extract_acs, get_indices_from_mask
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +16,7 @@ def GRAPPA_Recon(
         af: Union[list[int], tuple[int, ...]],
         delta: int = 0,
         kernel_size: Union[list[int], tuple[int, ...]] = (4,4,5),
-        lambda_: float = 1e-2,
+        lambda_: float = 1e-4,
         batch_size: int = 1,
         grappa_kernel: torch.Tensor = None,
         mask: torch.Tensor = None,
@@ -27,8 +25,6 @@ def GRAPPA_Recon(
         quiet=False,
 ) -> torch.Tensor:
     """Perform GRAPPA reconstruction.
-
-    /!\ For now only cartesian regular undersampling (no CAIPI) is supported.
 
     Parameters
     ----------
@@ -39,17 +35,17 @@ def GRAPPA_Recon(
     af : Union[list[int], tuple[int, ...]]
         Acceleration factors. [afy, afz].
     delta : int, optional
-        For CAIPIRINHA undersampling pattern. WIP. Default: `0`.
+        CAIPIRINHA shift. Default: `0`.
     kernel_size : Union[list[int], tuple[int, ...]], optional
         GRAPPA kernel size. Default `(4,4,5)`
     lambda_ : float, optional
-        Regularization parameter of the pseudo-inverse.
+        Regularization parameter of the pseudo-inverse. Default: `1e-4`
     batch_size : int, optional
         Size of the batch of `windows` to process by iteration in the kernel application phase. Default: `1`.
     grappa_kernel : torch.Tensor, optional
         GRAPPA kernel to be used. If `None`, the GRAPPA kernel weights will be computed. Default: `None`.
     mask : torch.Tensor, optional
-        Binary mask for masked kernel application. Shape: (ky, kz, kx).
+        Binary mask for masked kernel application. Shape: (ky, kz, kx). Default: `None`
     cuda : bool, optional
         Whether to use GPU or not. Default: `True`.
     cuda_mode : str, optional
@@ -57,8 +53,10 @@ def GRAPPA_Recon(
             * "all" - Both kernel estimation and kernel application . Memory intensive.
             * "estimation" - Only use CUDA for GRAPPA kernel estimation.
             * "application" - Only use CUDA for GRAPPA kernel application.
+        Default: `all`.
+    quiet : bool, optional
+        Enable printings and tqdm bars. Default: `True`.
     """
-    #TODO: Support of 2D-CAIPIRINHA undersampling pattern 
 
     if len(af) == 1:
         af = [af[0], 1]
@@ -110,7 +108,6 @@ def GRAPPA_Recon(
 
     idxs_tgs = torch.zeros(sbly, sblz, sblx, dtype=torch.bool)
     idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = True
-    #idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = ~((idxs_tgs == 1)[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] & idxs_src[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1])
 
     nsp = idxs_src.sum()
 
@@ -158,12 +155,7 @@ def GRAPPA_Recon(
                              left[1]:left[1]+size[1],
                              left[2]:left[2]+size[2]]
         
-
-    #shift_y = 0 if mask is not None else (abs(sig[0,:,0,0]) > 0).nonzero()[0].item()
-    #shift_z = 0 if mask is not None else (abs(sig[0,shift_y,:,0]) > 0).nonzero()[0].item()
-
     shift_y, shift_z = abs(sig).sum(0).sum(-1).nonzero()[0]
-
 
     sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
                                         (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
@@ -180,7 +172,6 @@ def GRAPPA_Recon(
     
     idxs_src = idxs_src.flatten()
 
-    #for y in tqdm(y_ival, disable=not verbose):
     for y in tqdm(y_ival, disable=quiet):
         sig_y = sig[:,y:y+size_chunk_y]
         sig_y = sig_y.cuda() if cuda and cuda_mode in ["all", "application"] else sig_y
@@ -198,7 +189,6 @@ def GRAPPA_Recon(
         del sig_y
         if cuda: torch.cuda.empty_cache()
 
-    #rec[abs(sig) != 0] = sig[abs(sig) != 0]
     if sbly > 1:
         rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
     
@@ -222,7 +212,6 @@ def GRAPPA_Recon(
                                                                   left[2]:left[2]+size[2]] + rec
         
         rec = sig_
-
 
     if not quiet:
         logger.info("GRAPPA Reconstruction...")
