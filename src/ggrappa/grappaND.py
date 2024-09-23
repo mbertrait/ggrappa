@@ -191,6 +191,8 @@ def GRAPPA_Recon(
         del sig_y
         if cuda: torch.cuda.empty_cache()
 
+    rec[abs(sig) > 0] = sig[abs(sig) > 0]
+        
     if sbly > 1:
         rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
     
