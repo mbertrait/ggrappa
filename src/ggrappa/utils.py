@@ -25,13 +25,13 @@ def extract_acs(sig):
     start_ky = ky // 2
     start_kz = kz // 2
 
-    left_start_ky = np.max(sig[0,start_ky:,start_kz,0].nonzero())
-    left_end_ky = np.max(sig[0,:start_ky+1,start_kz,0][::-1].nonzero())
+    left_start_ky = torch.max(torch.nonzero(sig[0, start_ky:, start_kz, 0], as_tuple=False)).item()
+    left_end_ky = torch.max(torch.nonzero(sig[0, :start_ky+1, start_kz, 0].flip(0), as_tuple=False)).item()
 
-    left_start_kz = np.max(sig[0,start_ky,start_kz:,0].nonzero())
-    left_end_kz = np.max(sig[0,start_ky,:start_kz+1,0][::-1].nonzero())
+    left_start_kz = torch.max(torch.nonzero(sig[0, start_ky, start_kz:, 0], as_tuple=False)).item()
+    left_end_kz = torch.max(torch.nonzero(sig[0, start_ky, :start_kz+1, 0].flip(0), as_tuple=False)).item()
 
-    return sig[:, start_ky-left_start_ky:start_ky+left_end_ky+1, start_kz-left_start_kz:start_kz+left_end_kz+1]
+    return sig[:, start_ky-(left_start_ky+1):start_ky+left_end_ky, start_kz-(left_start_kz+1):start_kz+left_end_kz]
     
 
 def pinv_batch(M, lambda_=1e-4, cuda=True):
