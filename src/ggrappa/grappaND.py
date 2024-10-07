@@ -4,10 +4,7 @@ import logging
 from tqdm import tqdm
 from typing import Union
 
-import numpy as np
-import matplotlib.pyplot as plt
-
-from .utils import pinv, extract_sampled_regions, get_indices_from_mask, get_src_tgs_blocks
+from .utils import pinv, extract_sampled_regions, get_indices_from_mask, get_src_tgs_blocks, pad_back_to_size
 
 
 logger = logging.getLogger(__name__)
@@ -84,6 +81,7 @@ def GRAPPA_Recon(
 
     nc = sig.shape[0]
     acsny, acsnz, acsnx = acs.shape[1:]
+    vol_shape = sig.shape[1:]
 
     logger.debug("GRAPPA Kernel size: ", kernel_size)
     logger.debug("lambda: ", lambda_)
@@ -165,7 +163,7 @@ def GRAPPA_Recon(
         
     shift_y, shift_z = 0, 0
     if isGolfSparks:
-        sig = extract_sampled_regions(sig, acs_only=False)
+        sig, start_loc, end_loc = extract_sampled_regions(sig, acs_only=False)
         samples_axis = [
             sig.abs().sum(0).sum(0).sum(-1),
             sig.abs().sum(0).sum(1).sum(-1)
@@ -204,14 +202,23 @@ def GRAPPA_Recon(
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            if not torch.any((blocks.abs().sum(0)!=0).sum(-1) == idxs_src.sum()):
-                # If we have no blocks with all samples, skip this iteration
-                continue
+            are_targets_fully_sampled = (blocks.abs().sum(2)!=0).sum(-1) == idxs_src.sum()
+            if isGolfSparks:
+                if not torch.any(are_targets_fully_sampled):
+                    # If we have no blocks with all samples, skip this iteration
+                    continue    
+                locs_fully_sampled = torch.nonzero(are_targets_fully_sampled, as_tuple=True)
+                res = torch.zeros((cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx), dtype=blocks.dtype, device=blocks.device)
+                blocks = blocks[locs_fully_sampled[0], locs_fully_sampled[1]]
+                blocks = blocks.reshape(blocks.shape[0], -1)
+                res[locs_fully_sampled[0], locs_fully_sampled[1]] = (blocks @ grappa_kernel).reshape(len(locs_fully_sampled[0]), nc, tbly, tblz, tblx)
+            else:
+                blocks = blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1)
+                res = (blocks @ grappa_kernel).reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx)
+            
             rec[:,  y+ypos:y+ypos+tbly*cur_batch_sz_y,
-                    z+zpos:z+zpos+tblz,                    xpos:xpos+tblx*cur_batch_sz_x]  =   (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
-                                                        .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx) \
-                                                        .permute(2,0,3,4,1,5) \
-                                                        .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
+                    z+zpos:z+zpos+tblz,
+                    xpos:xpos+tblx*cur_batch_sz_x]  =   res.permute(2,0,3,4,1,5).reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
 
         del sig_y
         if cuda: 
@@ -219,7 +226,9 @@ def GRAPPA_Recon(
 
     rec[abs(sig) > 0] = sig[abs(sig) > 0]
     
-    if not isGolfSparks:
+    if isGolfSparks:
+        rec = pad_back_to_size(rec, vol_shape, start_loc, end_loc)
+    else:
         # Remove the padding
         if sbly > 1:
             rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]

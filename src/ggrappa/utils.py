@@ -19,13 +19,6 @@ def get_indices_from_mask(mask):
 
     return min_indices, cube_dimensions
 
-def pad_back_to_size(data, size):
-    pad_size = size - data.shape[-1]
-    if pad_size > 0:
-        pad = np.zeros(data.shape[:-1] + (pad_size,), dtype=data.dtype)
-        data = np.concatenate((data, pad), axis=-1)
-    return data
-
 def get_src_tgs_blocks(blocks, idxs_src, idxs_tgs, check_type='acs'):
     """Extracts source and target blocks from the given blocks tensor based on specified indices.
     
@@ -64,7 +57,16 @@ def get_src_tgs_blocks(blocks, idxs_src, idxs_tgs, check_type='acs'):
         )
     select_blocks = blocks[:, locy, locz, locx].flatten(start_dim=-3)
     return select_blocks[..., idxs_src.flatten()], select_blocks[..., idxs_tgs.flatten()]
-    
+
+def get_grappa_filled_data_and_loc(sig, rec, params):
+    rec[:, np.abs(sig).sum(axis=0)!=0] = 0
+    sampled_mask = np.abs(rec).sum(axis=0) != 0
+    extra_data = rec[:, sampled_mask]
+    rec_loc = np.nonzero(sampled_mask)
+    rec_loc = np.asarray(rec_loc).T
+    extra_loc = rec_loc / (params['img_size'] * 2)
+    return extra_loc, extra_data
+     
 
 def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
     """Extracts and resamples the Cartesian portion of k-space data from the given k-space shots.
@@ -121,6 +123,34 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
         gridded_data[:, rounded_locs[0][0]:rounded_locs[0][0]+len(data[0]), rounded_locs[0][1], rounded_locs[0][2]] = data
     return gridded_data
     
+def pad_back_to_size(sig, vol_shape, start_loc, end_loc):
+    """Pads a given signal tensor back to a specified volume shape.
+    
+    Parameters
+    ----------
+    sig : torch.Tensor
+        The input signal tensor to be padded.
+    vol_shape : tuple of int
+        The shape of the volume to pad the signal tensor to (ky, kz, kx).
+    start_loc : tuple of int
+        The starting location (ky, kz, kx) for padding.
+    end_loc : tuple of int
+        The ending location (ky, kz, kx) for padding.
+    
+    Returns
+    -------
+    torch.Tensor
+        The padded signal tensor with the specified volume shape.
+    """
+    ky, kz, kx = vol_shape
+    start_ky = ky // 2
+    start_kz = kz // 2
+    start_kx = kx // 2
+    rec = torch.zeros((sig.shape[0], *vol_shape), dtype=sig.dtype)
+    rec[:,   start_ky-start_loc[0]+1:start_ky+end_loc[0]-1,
+                   start_kz-start_loc[1]+1:start_kz+end_loc[1]-1,
+                   start_kx-start_loc[2]+1:start_kx+end_loc[2]-1] = sig
+    return rec
 
 def extract_sampled_regions(sig, acs_only=True):
     """Extracts the Auto-Calibration Signal (ACS) region from the input signal.
@@ -163,9 +193,14 @@ def extract_sampled_regions(sig, acs_only=True):
     left_start_kx = torch_fn(torch.nonzero(sig_[0, start_ky, start_kz, start_kx:], as_tuple=False)).item()
     left_end_kx = torch_fn(torch.nonzero(sig_[0, start_ky, start_kz, :start_kx+1].flip(0), as_tuple=False)).item()
 
-    return sig[:,   start_ky-left_start_ky+1:start_ky+left_end_ky-1,
+    center = sig[:,   start_ky-left_start_ky+1:start_ky+left_end_ky-1,
                     start_kz-left_start_kz+1:start_kz+left_end_kz-1,
                     start_kx-left_start_kx+1:start_kx+left_end_kx-1]
+    if acs_only:
+        return center
+    start_loc = (left_start_ky, left_start_kz, left_start_kx)
+    end_loc = (left_end_ky, left_end_kz, left_end_kx)
+    return center, start_loc, end_loc
     
 
 def pinv_batch(M, lambda_=1e-4, cuda=True):
