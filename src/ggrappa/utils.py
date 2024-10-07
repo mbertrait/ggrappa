@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import scipy as sp
 
 
 def rss(data, axis=0):
@@ -18,20 +19,189 @@ def get_indices_from_mask(mask):
 
     return min_indices, cube_dimensions
 
+def get_src_tgs_blocks(blocks, idxs_src, idxs_tgs, check_type='acs'):
+    """Extracts source and target blocks from the given blocks tensor based on specified indices.
+    
+    Parameters
+    ----------
+    blocks : torch.Tensor
+        A tensor containing the blocks from which to extract source and target blocks.
+    idxs_src : torch.Tensor
+        A tensor containing the indices of the source blocks to be extracted.
+    idxs_tgs : torch.Tensor
+        A tensor containing the indices of the target blocks to be extracted.
+    check_type : str, optional
+        The type of check to perform when selecting blocks. Options are 'acs' and 'all_sampled_srcs'.
+        Default is 'acs'.
+        If 'acs', the function will select blocks where all samples are present.
+        If 'all_sampled_srcs', the function will select blocks where all samples are present in the source locations.
+        
+    Returns
+    -------
+    select_blocks_src : torch.Tensor
+        A tensor containing the selected source blocks.
+    select_blocks_tgs : torch.Tensor
+        A tensor containing the selected target blocks.
+    """
+    
+    if check_type == 'acs':
+        samples_per_block = (blocks.sum(dim=0)!=0).sum(dim=(-3, -2, -1))
+        locy, locz, locx = torch.nonzero(samples_per_block == idxs_src.numel(), as_tuple=True)
+    elif check_type == 'all_sampled_srcs':
+        blocks = blocks.flatten(start_dim=-3)
+        srcs_per_block = blocks[..., idxs_src.flatten()].sum(dim=-1)
+        tgs_per_block = blocks[..., idxs_tgs.flatten()].sum(dim=-1)
+        locy, locz, locx = torch.nonzero(
+            (srcs_per_block.abs() == torch.sum(idxs_src)) and (tgs_per_block.abs() < torch.sum(idxs_tgs)),
+            as_tuple=True,
+        )
+    select_blocks = blocks[:, locy, locz, locx].flatten(start_dim=-3)
+    return select_blocks[..., idxs_src.flatten()], select_blocks[..., idxs_tgs.flatten()]
 
-def extract_acs(sig):
-    _, ky, kz, _ = sig.shape
+def get_grappa_filled_data_and_loc(sig, rec, params):
+    rec[:, np.abs(sig).sum(axis=0)!=0] = 0
+    sampled_mask = np.abs(rec).sum(axis=0) != 0
+    extra_data = rec[:, sampled_mask]
+    rec_loc = np.nonzero(sampled_mask)
+    rec_loc = np.asarray(rec_loc).T
+    extra_loc = rec_loc / (params['img_size'] * 2)
+    return extra_loc, extra_data
+     
+
+def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
+    """Extracts and resamples the Cartesian portion of k-space data from the given k-space shots.
+
+    Parameters
+    ----------
+    kspace_shots : numpy.ndarray
+        The k-space trajectory shots.
+    traj_params : dict
+        Dictionary containing trajectory parameters, including 'img_size'.
+    kspace_data : numpy.ndarray
+        The k-space data corresponding to the shots.
+    osf:  int, optional
+        The oversampling factor for resampling, by default 1.
+
+    Returns
+    -------
+    numpy.ndarray
+        The gridded k-space data with the Cartesian portion resampled and placed in the appropriate locations.
+    """
+    grads = np.diff(kspace_shots, axis=1)
+    re_kspace_data = kspace_data.reshape(kspace_data.shape[0], *kspace_shots.shape[:2])
+    mask = grads[..., 1] == 0
+    pad_mask = np.pad(mask, ((0, 0), (1, 1)), constant_values=False)
+    mask = np.diff(pad_mask*1)
+    starts = np.argwhere(mask == 1)
+    ends = np.argwhere(mask == -1)
+    max_length = np.zeros(grads.shape[0])
+    locs = np.ones((grads.shape[0], 2))*-1
+    sampled_loc = [[],] * grads.shape[0]
+    cart_loc = [[],] * grads.shape[0]
+
+    gridded_data = np.zeros((kspace_data.shape[0], *traj_params['img_size']), dtype=np.complex64)
+    for start, end in zip(starts, ends):
+        row, start_col = start
+        _, end_col = end
+        length = end_col - start_col
+        if length > max_length[row]:
+            max_length[row] = length
+            locs[row, 0] = start_col
+            locs[row, 1] = end_col
+            cart_loc[row] = np.copy(kspace_shots[row, start_col:end_col])
+            sampled_loc[row] = [start_col, end_col]
+    for row, (locs, s_loc) in enumerate(zip(cart_loc, sampled_loc)):
+        if not len(locs):
+            continue
+        data = sp.signal.resample(
+            re_kspace_data[:, row, s_loc[0]: s_loc[1]],
+            (s_loc[1]-s_loc[0])//osf,
+            axis=-1,
+        )
+        locs += 0.5
+        locs *= np.asarray(traj_params["img_size"]).T
+        rounded_locs = locs.round(0).astype('int')
+        gridded_data[:, rounded_locs[0][0]:rounded_locs[0][0]+len(data[0]), rounded_locs[0][1], rounded_locs[0][2]] = data
+    return gridded_data
+    
+def pad_back_to_size(sig, vol_shape, start_loc, end_loc):
+    """Pads a given signal tensor back to a specified volume shape.
+    
+    Parameters
+    ----------
+    sig : torch.Tensor
+        The input signal tensor to be padded.
+    vol_shape : tuple of int
+        The shape of the volume to pad the signal tensor to (ky, kz, kx).
+    start_loc : tuple of int
+        The starting location (ky, kz, kx) for padding.
+    end_loc : tuple of int
+        The ending location (ky, kz, kx) for padding.
+    
+    Returns
+    -------
+    torch.Tensor
+        The padded signal tensor with the specified volume shape.
+    """
+    ky, kz, kx = vol_shape
+    start_ky = ky // 2
+    start_kz = kz // 2
+    start_kx = kx // 2
+    rec = torch.zeros((sig.shape[0], *vol_shape), dtype=sig.dtype)
+    rec[:,   start_ky-start_loc[0]+1:start_ky+end_loc[0]-1,
+                   start_kz-start_loc[1]+1:start_kz+end_loc[1]-1,
+                   start_kx-start_loc[2]+1:start_kx+end_loc[2]-1] = sig
+    return rec
+
+def extract_sampled_regions(sig, acs_only=True):
+    """Extracts the Auto-Calibration Signal (ACS) region from the input signal.
+    This is a generic function which finds all the regions that is continuously sampled 
+    in the center of k-space.
+
+    Parameters
+    ----------
+    sig : torch.Tensor
+        A 4D tensor with shape (coils, ky, kz, kx) representing the input signal.
+    acs_only : bool, optional
+        If True, the function will return the ACS region only. Default: True.
+        If False, the function will return a region within which sampling starts.
+
+    Returns
+    -------
+    torch.Tensor
+        A 4D tensor containing the extracted ACS region from the input signal.
+    """
+    _, ky, kz, kx = sig.shape
 
     start_ky = ky // 2
     start_kz = kz // 2
+    start_kx = kx // 2
 
-    left_start_ky = torch.max(torch.nonzero(sig[0, start_ky:, start_kz, 0], as_tuple=False)).item()
-    left_end_ky = torch.max(torch.nonzero(sig[0, :start_ky+1, start_kz, 0].flip(0), as_tuple=False)).item()
+    torch_fn = torch.min
+    if acs_only:
+        sig_ = (abs(sig) == 0)
+    else:
+        sig_ = (abs(sig) != 0)
+        torch_fn = torch.max
 
-    left_start_kz = torch.max(torch.nonzero(sig[0, start_ky, start_kz:, 0], as_tuple=False)).item()
-    left_end_kz = torch.max(torch.nonzero(sig[0, start_ky, :start_kz+1, 0].flip(0), as_tuple=False)).item()
 
-    return sig[:, start_ky-(left_start_ky+1):start_ky+left_end_ky, start_kz-(left_start_kz+1):start_kz+left_end_kz]
+    left_start_ky = torch_fn(torch.nonzero(sig_[0, start_ky:, start_kz, start_kx], as_tuple=False)).item()
+    left_end_ky = torch_fn(torch.nonzero(sig_[0, :start_ky+1, start_kz, start_kx].flip(0), as_tuple=False)).item()
+
+    left_start_kz = torch_fn(torch.nonzero(sig_[0, start_ky, start_kz:, start_kx], as_tuple=False)).item()
+    left_end_kz = torch_fn(torch.nonzero(sig_[0, start_ky, :start_kz+1, start_kx].flip(0), as_tuple=False)).item()
+
+    left_start_kx = torch_fn(torch.nonzero(sig_[0, start_ky, start_kz, start_kx:], as_tuple=False)).item()
+    left_end_kx = torch_fn(torch.nonzero(sig_[0, start_ky, start_kz, :start_kx+1].flip(0), as_tuple=False)).item()
+
+    center = sig[:,   start_ky-left_start_ky+1:start_ky+left_end_ky-1,
+                    start_kz-left_start_kz+1:start_kz+left_end_kz-1,
+                    start_kx-left_start_kx+1:start_kx+left_end_kx-1]
+    if acs_only:
+        return center
+    start_loc = (left_start_ky, left_start_kz, left_start_kx)
+    end_loc = (left_end_ky, left_end_kz, left_end_kx)
+    return center, start_loc, end_loc
     
 
 def pinv_batch(M, lambda_=1e-4, cuda=True):

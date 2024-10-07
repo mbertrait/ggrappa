@@ -4,7 +4,7 @@ import logging
 from tqdm import tqdm
 from typing import Union
 
-from .utils import pinv, extract_acs, get_indices_from_mask
+from .utils import pinv, extract_sampled_regions, get_indices_from_mask, get_src_tgs_blocks, pad_back_to_size
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ def GRAPPA_Recon(
         cuda: bool = True,
         cuda_mode: str = "all",
         quiet=False,
+        isGolfSparks=False
 ) -> torch.Tensor:
     """Performs GRAPPA reconstruction.
 
@@ -56,6 +57,8 @@ def GRAPPA_Recon(
         Default: `all`.
     quiet : bool, optional
         Enable printings and tqdm bars. Default: `True`.
+    isGolfSparks : bool, optional
+        Whether the input data is from the GoLF-SPARKLING sequence. Default: `False`.
     """
 
     if len(af) == 1:
@@ -68,7 +71,7 @@ def GRAPPA_Recon(
     
     if grappa_kernel is None:
         if acs is None:
-            acs = extract_acs(sig)
+            acs = extract_sampled_regions(sig)
 
         if len(acs.shape) == 3:
             acs = acs[:, :, None, :]
@@ -78,6 +81,7 @@ def GRAPPA_Recon(
 
     nc = sig.shape[0]
     acsny, acsnz, acsnx = acs.shape[1:]
+    vol_shape = sig.shape[1:]
 
     logger.debug("GRAPPA Kernel size: ", kernel_size)
     logger.debug("lambda: ", lambda_)
@@ -126,10 +130,12 @@ def GRAPPA_Recon(
         blocks = acs.unfold(dimension=1, size=sbly, step=1)
         blocks = blocks.unfold(dimension=2, size=sblz, step=1)
         blocks = blocks.unfold(dimension=3, size=sblx, step=1)
-        blocks = blocks.flatten(start_dim=-3)
-
-        src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
-        tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
+        if isGolfSparks:
+            src, tgs = get_src_tgs_blocks(blocks, idxs_src, idxs_tgs)
+        else:
+            blocks = blocks.flatten(start_dim=-3)
+            src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
+            tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
         
         src = src.permute(1,0,-1).reshape(-1, nc*nsp)
         tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
@@ -155,11 +161,26 @@ def GRAPPA_Recon(
                              left[1]:left[1]+size[1],
                              left[2]:left[2]+size[2]]
         
-    shift_y, shift_z = abs(sig).sum(0).sum(-1).nonzero()[0]
-
-    sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
-                                        (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
-                                        (af[0] * (1 if delta == 0 else af[1]//delta) - ypos)%tbly + ypos, (sbly-ypos-tbly)))
+    shift_y, shift_z = 0, 0
+    if isGolfSparks:
+        sig, start_loc, end_loc = extract_sampled_regions(sig, acs_only=False)
+        samples_axis = [
+            sig.abs().sum(0).sum(0).sum(-1),
+            sig.abs().sum(0).sum(1).sum(-1)
+        ]
+        shifts = [
+            torch.argmax(torch.stack([
+                torch.sum(samples_axis[axis][i::af_axis]) 
+                for i in range(af_axis)
+            ])).item()
+            for axis, af_axis in enumerate(af)
+        ]
+        shift_y, shift_z = shifts
+    else:
+        shift_y, shift_z = abs(sig).sum(0).sum(-1).nonzero()[0]
+        sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
+                                            (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
+                                            (af[0] * (1 if delta == 0 else af[1]//delta) - ypos)%tbly + ypos, (sbly-ypos-tbly)))
 
     rec = torch.zeros_like(sig)
 
@@ -181,26 +202,42 @@ def GRAPPA_Recon(
             cur_batch_sz_y = blocks.shape[0]
             cur_batch_sz_x = blocks.shape[1]
             blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
+            are_targets_fully_sampled = (blocks.abs().sum(2)!=0).sum(-1) == idxs_src.sum()
+            if isGolfSparks:
+                if not torch.any(are_targets_fully_sampled):
+                    # If we have no blocks with all samples, skip this iteration
+                    continue    
+                locs_fully_sampled = torch.nonzero(are_targets_fully_sampled, as_tuple=True)
+                res = torch.zeros((cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx), dtype=blocks.dtype, device=blocks.device)
+                blocks = blocks[locs_fully_sampled[0], locs_fully_sampled[1]]
+                blocks = blocks.reshape(blocks.shape[0], -1)
+                res[locs_fully_sampled[0], locs_fully_sampled[1]] = (blocks @ grappa_kernel).reshape(len(locs_fully_sampled[0]), nc, tbly, tblz, tblx)
+            else:
+                blocks = blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1)
+                res = (blocks @ grappa_kernel).reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx)
+            
             rec[:,  y+ypos:y+ypos+tbly*cur_batch_sz_y,
                     z+zpos:z+zpos+tblz,
-                    xpos:xpos+tblx*cur_batch_sz_x]  =   (blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1) @ grappa_kernel) \
-                                                        .reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx) \
-                                                        .permute(2,0,3,4,1,5) \
-                                                        .reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
+                    xpos:xpos+tblx*cur_batch_sz_x]  =   res.permute(2,0,3,4,1,5).reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
 
         del sig_y
-        if cuda: torch.cuda.empty_cache()
+        if cuda: 
+            torch.cuda.empty_cache()
 
     rec[abs(sig) > 0] = sig[abs(sig) > 0]
-        
-    if sbly > 1:
-        rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
     
-    if sblz > 1:
-        rec = rec[...,(af[1] - zpos)%tblz + zpos:-(sblz-zpos-tblz),:]
+    if isGolfSparks:
+        rec = pad_back_to_size(rec, vol_shape, start_loc, end_loc)
+    else:
+        # Remove the padding
+        if sbly > 1:
+            rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
+    
+        if sblz > 1:
+            rec = rec[...,(af[1] - zpos)%tblz + zpos:-(sblz-zpos-tblz),:]
 
-    if sblx > 1:
-        rec = rec[...,xpos:-(sblx-xpos-tblx)]
+        if sblx > 1:
+            rec = rec[...,xpos:-(sblx-xpos-tblx)]
     
     if mask is not None:
         rec *= mask[left[0]:left[0]+size[0],
