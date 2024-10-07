@@ -79,6 +79,7 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
         Dictionary containing trajectory parameters, including 'img_size'.
     kspace_data : numpy.ndarray
         The k-space data corresponding to the shots.
+    osf:  int, optional
         The oversampling factor for resampling, by default 1.
 
     Returns
