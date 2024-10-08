@@ -94,7 +94,7 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
     mask = np.diff(pad_mask*1)
     starts = np.argwhere(mask == 1)
     ends = np.argwhere(mask == -1)
-    max_length = np.zeros(grads.shape[0])
+    max_length = np.zeros(grads.shape[0]) + osf # To ensure we have atleast one point after resampling
     locs = np.ones((grads.shape[0], 2))*-1
     sampled_loc = [[],] * grads.shape[0]
     cart_loc = [[],] * grads.shape[0]
