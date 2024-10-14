@@ -64,7 +64,7 @@ def get_grappa_filled_data_and_loc(sig, rec, params):
     extra_data = rec[:, sampled_mask]
     rec_loc = np.nonzero(sampled_mask)
     rec_loc = np.asarray(rec_loc).T
-    extra_loc = rec_loc / (params['img_size'] * 2)
+    extra_loc = rec_loc / params['img_size'] - 0.5
     return extra_loc, extra_data
      
 
