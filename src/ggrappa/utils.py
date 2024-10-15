@@ -112,13 +112,16 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, calc_osf_
             cart_loc[row] = np.copy(kspace_shots[row, start_col:end_col])
             sampled_loc[row] = [start_col, end_col]
     for row, (locs, s_loc) in enumerate(zip(cart_loc, sampled_loc)):
-        if not len(locs):
+        if not len(locs) or int(
+                (s_loc[1]-s_loc[0])*
+                np.diff(kspace_shots[row, s_loc[0]:s_loc[0]+2, 0])*traj_params['img_size'][0]
+            ) == 0:
             continue
         data = sp.signal.resample(
             re_kspace_data[:, row, s_loc[0]: s_loc[1]],
             int(
                 (s_loc[1]-s_loc[0])*
-                np.diff(kspace_shots[row, s_loc[0]:s_loc[0]+2, 0])*2*traj_params['img_size'][0]
+                np.diff(kspace_shots[row, s_loc[0]:s_loc[0]+2, 0])*traj_params['img_size'][0]
             ),
             axis=-1,
         )
