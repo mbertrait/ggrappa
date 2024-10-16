@@ -13,6 +13,7 @@ def estimate_grappa_kernel(acs,
                            delta=0,
                            lambda_=1e-4,
                            cuda=False,
+                           cuda_mode="estimation",
                            isGolfSparks=False,
                            quiet=False,
 ) -> GRAPPAReconSpec:
