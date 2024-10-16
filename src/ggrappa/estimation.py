@@ -12,9 +12,7 @@ def estimate_grappa_kernel(acs,
                            kernel_size=[4,4,5],
                            delta=0,
                            lambda_=1e-4,
-                           sig=None,
                            cuda=False,
-                           cuda_mode="all",
                            isGolfSparks=False,
                            quiet=False,
 ) -> GRAPPAReconSpec:
@@ -22,17 +20,8 @@ def estimate_grappa_kernel(acs,
     if len(af) == 1:
         af = [af[0], 1]
 
-    if len(sig.shape) == 3: # 2D multicoil
-        sig = sig[:, :, None, :]
-        if len(af) == 2:
-            af = [af[0], 1]
-    
-    if grappa_kernel is None:
-        if acs is None:
-            acs = extract_sampled_regions(sig)
-
-        if len(acs.shape) == 3:
-            acs = acs[:, :, None, :]
+    if len(acs.shape) == 3:
+        acs = acs[:, :, None, :]
 
     nc, acsny, acsnz, acsnx = acs.shape
 
