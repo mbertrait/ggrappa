@@ -1,6 +1,9 @@
 # gGRAPPA: A generalized GRAPPA for MRI reconstruction
+<img align="left" width="60%" src="https://github.com/user-attachments/assets/4153e441-03d2-4f6c-9f9f-f338dc07b62b"> 
+<h1> A generalized GRAPPA reconstruction package accelerated by GPU </br></br></h1>
 
 gGRAPPA is a Python package allowing GRAPPA reconstruction of k-space data, with batching capabilities allowing huge files to be reconstructed on GPU.
+
 
 ## Features
 
