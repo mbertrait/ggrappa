@@ -2,7 +2,7 @@ import torch
 import logging
 
 from . import GRAPPAReconSpec
-from .utils import pinv, extract_sampled_regions, get_src_tgs_blocks
+from .utils import pinv, get_src_tgs_blocks
 
 logger = logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ def estimate_grappa_kernel(acs,
 
     tbly = af[0] * (1 if delta == 0 else af[1]//delta)
     tblz = af[1]
+    tblx = 1
 
     sbly = min(pat.shape[0], acsny)
     sblz = min(pat.shape[1], acsnz)
@@ -83,7 +84,8 @@ def estimate_grappa_kernel(acs,
 
     return GRAPPAReconSpec(weights=grappa_kernel,
                            af=af,
-                           detla=delta,
+                           delta=delta,
                            pos=[ypos, zpos, xpos],
-                           sbl=[sbly, sblz],
-                           tbl=[tbly, tblz])
+                           sbl=[sbly, sblz, sblx],
+                           tbl=[tbly, tblz, tblx],
+                           idxs_src=idxs_src)
