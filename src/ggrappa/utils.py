@@ -64,11 +64,11 @@ def get_grappa_filled_data_and_loc(sig, rec, params):
     extra_data = rec[:, sampled_mask]
     rec_loc = np.nonzero(sampled_mask)
     rec_loc = np.asarray(rec_loc).T
-    extra_loc = rec_loc / (params['img_size'] * 2)
+    extra_loc = rec_loc / params['img_size'] - 0.5
     return extra_loc, extra_data
      
 
-def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
+def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, calc_osf_buffer=10):
     """Extracts and resamples the Cartesian portion of k-space data from the given k-space shots.
 
     Parameters
@@ -79,7 +79,7 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
         Dictionary containing trajectory parameters, including 'img_size'.
     kspace_data : numpy.ndarray
         The k-space data corresponding to the shots.
-    osf:  int, optional
+    calc_osf_buffer:  float, optional
         The oversampling factor for resampling, by default 1.
 
     Returns
@@ -94,6 +94,7 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
     mask = np.diff(pad_mask*1)
     starts = np.argwhere(mask == 1)
     ends = np.argwhere(mask == -1)
+    osf = 1/np.mean(np.diff(kspace_shots[kspace_shots.shape[0]//2, kspace_shots.shape[1]//2-calc_osf_buffer:kspace_shots.shape[1]//2+calc_osf_buffer, 0])*traj_params['img_size'][0])
     max_length = np.zeros(grads.shape[0]) + osf # To ensure we have atleast one point after resampling
     locs = np.ones((grads.shape[0], 2))*-1
     sampled_loc = [[],] * grads.shape[0]
@@ -111,11 +112,17 @@ def get_cart_portion_sparkling(kspace_shots, traj_params, kspace_data, osf=1):
             cart_loc[row] = np.copy(kspace_shots[row, start_col:end_col])
             sampled_loc[row] = [start_col, end_col]
     for row, (locs, s_loc) in enumerate(zip(cart_loc, sampled_loc)):
-        if not len(locs):
+        if not len(locs) or int(
+                (s_loc[1]-s_loc[0])*
+                np.diff(kspace_shots[row, s_loc[0]:s_loc[0]+2, 0])*traj_params['img_size'][0]
+            ) == 0:
             continue
         data = sp.signal.resample(
             re_kspace_data[:, row, s_loc[0]: s_loc[1]],
-            (s_loc[1]-s_loc[0])//osf,
+            int(
+                (s_loc[1]-s_loc[0])*
+                np.diff(kspace_shots[row, s_loc[0]:s_loc[0]+2, 0])*traj_params['img_size'][0]
+            ),
             axis=-1,
         )
         locs += 0.5
