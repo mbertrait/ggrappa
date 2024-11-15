@@ -23,11 +23,12 @@ def apply_grappa_kernel(sig,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
 
     grappa_kernel = grappa_recon_spec.weights.cuda() if cuda and cuda_mode in ["all", "application"] else grappa_recon_spec.weights
-    xpos, ypos, zpos = grappa_recon_spec.pos
+    ypos, zpos, xpos = grappa_recon_spec.pos
     tbly, tblz, tblx = grappa_recon_spec.tbl
     sbly, sblz, sblx = grappa_recon_spec.sbl
     af = grappa_recon_spec.af
     delta = grappa_recon_spec.delta
+    idxs_src = grappa_recon_spec.idxs_src
 
     nc, *vol_shape = sig.shape
 
