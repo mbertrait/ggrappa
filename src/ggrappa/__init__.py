@@ -11,6 +11,7 @@ from typing import List
 @dataclass
 class GRAPPAReconSpec:
     weights: torch.Tensor
+    idxs_src: torch.Tensor
     sbl: List[int]
     tbl: List[int]
     pos: List[int]
@@ -18,7 +19,7 @@ class GRAPPAReconSpec:
     delta: int
 
 
-from .grappaND import GRAPPA_Recon
+from .grappaND import *
 
 from importlib.metadata import version, PackageNotFoundError
 
