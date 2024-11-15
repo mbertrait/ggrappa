@@ -1,10 +1,11 @@
 import torch
 import logging
 
-from tqdm import tqdm
 from typing import Union
 
-from .utils import pinv, extract_sampled_regions, get_indices_from_mask, get_src_tgs_blocks, pad_back_to_size
+from . import GRAPPAReconSpec
+from .estimation import estimate_grappa_kernel
+from .application import apply_grappa_kernel
 
 
 logger = logging.getLogger(__name__)
@@ -18,12 +19,14 @@ def GRAPPA_Recon(
         kernel_size: Union[list[int], tuple[int, ...]] = (4,4,5),
         lambda_: float = 1e-4,
         batch_size: int = 1,
-        grappa_kernel: torch.Tensor = None,
+        grappa_recon_spec: GRAPPAReconSpec = None,
         mask: torch.Tensor = None,
+        isGolfSparks=False,
         cuda: bool = True,
         cuda_mode: str = "all",
+        return_kernel: bool = False,
         quiet=False,
-        isGolfSparks=False
+
 ) -> torch.Tensor:
     """Performs GRAPPA reconstruction.
 
@@ -60,201 +63,23 @@ def GRAPPA_Recon(
     isGolfSparks : bool, optional
         Whether the input data is from the GoLF-SPARKLING sequence. Default: `False`.
     """
+    if not grappa_recon_spec:
+        grappa_recon_spec = estimate_grappa_kernel(acs,
+                                                   af=af,
+                                                   kernel_size=kernel_size,
+                                                   delta=delta,
+                                                   lambda_=lambda_,
+                                                   cuda=cuda,
+                                                   cuda_mode=cuda_mode,
+                                                   isGolfSparks=isGolfSparks,
+                                                   quiet=quiet)
 
-    if len(af) == 1:
-        af = [af[0], 1]
-
-    if len(sig.shape) == 3: # 2D multicoil
-        sig = sig[:, :, None, :]
-        if len(af) == 2:
-            af = [af[0], 1]
-    
-    if grappa_kernel is None:
-        if acs is None:
-            acs = extract_sampled_regions(sig)
-
-        if len(acs.shape) == 3:
-            acs = acs[:, :, None, :]
-    
-    if mask is not None:
-        assert sig.shape[1:] == mask.shape
-
-    nc = sig.shape[0]
-    acsny, acsnz, acsnx = acs.shape[1:]
-    vol_shape = sig.shape[1:]
-
-    logger.debug("GRAPPA Kernel size: ", kernel_size)
-    logger.debug("lambda: ", lambda_)
-    logger.debug("batch size: ", batch_size)
-
-    if kernel_size:
-        pat = torch.zeros([((k-1) * af[i]*[1, (1 if delta == 0 else af[1]//delta)][i==0] + 1) for i, k in enumerate(kernel_size[:2])])
-
-    cnt=0
-    for y in range(0, pat.shape[0], af[0]):
-        pat[y,cnt::af[1]] = 1
-        cnt = (cnt+delta)%af[1]
-
-    tbly = af[0] * (1 if delta == 0 else af[1]//delta)
-    tblz = af[1]
-    tblx = 1
-
-    sbly = min(pat.shape[0], acsny)
-    sblz = min(pat.shape[1], acsnz)
-    sblx = min(kernel_size[-1], acsnx)
-
-    xpos = (sblx-1)//2
-    ypos = (sbly-tbly)//2
-    zpos = (sblz-tblz)//2
-
-    idxs_src = (pat[:sbly, :sblz] == 1)
-    idxs_src = idxs_src.unsqueeze(-1).expand(*idxs_src.size(), sblx)
-
-    idxs_tgs = torch.zeros(sbly, sblz, sblx, dtype=torch.bool)
-    idxs_tgs[ypos:ypos+tbly, zpos:zpos+tblz, xpos:xpos+1] = True
-
-    nsp = idxs_src.sum()
-
-    if grappa_kernel is None:
-
-        ########################################################
-        #                  Kernel estimation                   #
-        ########################################################
-        if not quiet:
-            logger.info("GRAPPA Kernel estimation...")
-
-        # Keep an eye on torch.nn.Unfold (and its functionnal) for 3D sliding block support
-        # for future replacement.
-        # https://pytorch.org/docs/stable/generated/torch.nn.Unfold.html
-        # https://pytorch.org/docs/stable/generated/torch.nn.functional.unfold.html
-        blocks = acs.unfold(dimension=1, size=sbly, step=1)
-        blocks = blocks.unfold(dimension=2, size=sblz, step=1)
-        blocks = blocks.unfold(dimension=3, size=sblx, step=1)
-        if isGolfSparks:
-            src, tgs = get_src_tgs_blocks(blocks, idxs_src, idxs_tgs)
-        else:
-            blocks = blocks.flatten(start_dim=-3)
-            src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
-            tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
-        
-        src = src.permute(1,0,-1).reshape(-1, nc*nsp)
-        tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
-
-        src = src.cuda() if cuda and cuda_mode in ["all", "estimation"] else src
-        tgs = tgs.cuda() if cuda and cuda_mode in ["all", "estimation"] else tgs
-
-        grappa_kernel = pinv(src, lambda_) @ src.H @ tgs
-
-        del src, tgs, blocks
-        torch.cuda.empty_cache()
-
-    ########################################################
-    #                  Kernel application                  #
-    ########################################################
-
-    grappa_kernel = grappa_kernel.cuda() if cuda and cuda_mode in ["all", "application"] else grappa_kernel
-
-    if mask is not None:
-        sig_ = sig
-        left, size = get_indices_from_mask(mask)
-        sig = (sig*mask)[...,left[0]:left[0]+size[0],
-                             left[1]:left[1]+size[1],
-                             left[2]:left[2]+size[2]]
-        
-    shift_y, shift_z = 0, 0
-    if isGolfSparks:
-        sig, start_loc, end_loc = extract_sampled_regions(sig, acs_only=False)
-        samples_axis = [
-            sig.abs().sum(0).sum(0).sum(-1),
-            sig.abs().sum(0).sum(1).sum(-1)
-        ]
-        shifts = [
-            torch.argmax(torch.stack([
-                torch.sum(samples_axis[axis][i::af_axis]) 
-                for i in range(af_axis)
-            ])).item()
-            for axis, af_axis in enumerate(af)
-        ]
-        shift_y, shift_z = shifts
-    else:
-        shift_y, shift_z = abs(sig).sum(0).sum(-1).nonzero()[0]
-        sig = torch.nn.functional.pad(sig,  (xpos, (sblx-xpos-tblx),
-                                            (af[1] - zpos)%tblz + zpos, (sblz-zpos-tblz),
-                                            (af[0] * (1 if delta == 0 else af[1]//delta) - ypos)%tbly + ypos, (sbly-ypos-tbly)))
-
-    rec = torch.zeros_like(sig)
-
-    size_chunk_y = sbly + tbly*(batch_size - 1)
-    y_ival = range(shift_y, max(rec.shape[1] - sbly, 1), tbly*batch_size)
-    z_ival = range(shift_z, max(rec.shape[2] - sblz, 1), tblz)
-
-    if not quiet:
-        logger.info("GRAPPA Reconstruction...")
-    
-    idxs_src = idxs_src.flatten()
-
-    for y in tqdm(y_ival, disable=quiet):
-        sig_y = sig[:,y:y+size_chunk_y]
-        sig_y = sig_y.cuda() if cuda and cuda_mode in ["all", "application"] else sig_y
-        for z in z_ival:
-            blocks = sig_y[:,:, z:z+sblz, :].unfold(dimension=1, size=sbly, step=tbly).unfold(dimension=3, size=sblx, step=tblx)
-            blocks = blocks.permute(1,3,0,4,2,5)
-            cur_batch_sz_y = blocks.shape[0]
-            cur_batch_sz_x = blocks.shape[1]
-            blocks = blocks.reshape(cur_batch_sz_y, cur_batch_sz_x, nc, -1)[..., idxs_src]
-            are_targets_fully_sampled = (blocks.abs().sum(2)!=0).sum(-1) == idxs_src.sum()
-            if isGolfSparks:
-                if not torch.any(are_targets_fully_sampled):
-                    # If we have no blocks with all samples, skip this iteration
-                    continue    
-                locs_fully_sampled = torch.nonzero(are_targets_fully_sampled, as_tuple=True)
-                res = torch.zeros((cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx), dtype=blocks.dtype, device=blocks.device)
-                blocks = blocks[locs_fully_sampled[0], locs_fully_sampled[1]]
-                blocks = blocks.reshape(blocks.shape[0], -1)
-                res[locs_fully_sampled[0], locs_fully_sampled[1]] = (blocks @ grappa_kernel).reshape(len(locs_fully_sampled[0]), nc, tbly, tblz, tblx)
-            else:
-                blocks = blocks.reshape(cur_batch_sz_y*cur_batch_sz_x, -1)
-                res = (blocks @ grappa_kernel).reshape(cur_batch_sz_y, cur_batch_sz_x, nc, tbly, tblz, tblx)
-            
-            rec[:,  y+ypos:y+ypos+tbly*cur_batch_sz_y,
-                    z+zpos:z+zpos+tblz,
-                    xpos:xpos+tblx*cur_batch_sz_x]  =   res.permute(2,0,3,4,1,5).reshape(nc, cur_batch_sz_y*tbly, tblz, cur_batch_sz_x*tblx)
-
-        del sig_y
-        if cuda: 
-            torch.cuda.empty_cache()
-
-    rec[abs(sig) > 0] = sig[abs(sig) > 0]
-    
-    if isGolfSparks:
-        rec = pad_back_to_size(rec, vol_shape, start_loc, end_loc)
-    else:
-        # Remove the padding
-        if sbly > 1:
-            rec = rec[:, (af[0] - ypos)%tbly + ypos:-(sbly-ypos-tbly)]
-    
-        if sblz > 1:
-            rec = rec[...,(af[1] - zpos)%tblz + zpos:-(sblz-zpos-tblz),:]
-
-        if sblx > 1:
-            rec = rec[...,xpos:-(sblx-xpos-tblx)]
-    
-    if mask is not None:
-        rec *= mask[left[0]:left[0]+size[0],
-                    left[1]:left[1]+size[1],
-                    left[2]:left[2]+size[2]]
-
-        not_mask = (~mask) if mask.dtype == torch.bool else (1 - mask)
-        
-        sig_[...,left[0]:left[0]+size[0],
-                 left[1]:left[1]+size[1],
-                 left[2]:left[2]+size[2]] = (sig_ * not_mask)[...,left[0]:left[0]+size[0],
-                                                                  left[1]:left[1]+size[1],
-                                                                  left[2]:left[2]+size[2]] + rec
-        
-        rec = sig_
-
-    if not quiet:
-        logger.info("GRAPPA Reconstruction...")
-
-    return rec, grappa_kernel
+    return apply_grappa_kernel(sig,
+                               grappa_recon_spec,
+                               batch_size=batch_size,
+                               cuda=cuda,
+                               cuda_mode=cuda_mode,
+                               mask=mask,
+                               isGolfSparks=isGolfSparks,
+                               return_kernel=return_kernel,
+                               quiet=quiet)
