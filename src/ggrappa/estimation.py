@@ -70,9 +70,8 @@ def estimate_grappa_kernel(acs,
     if isGolfSparks:
         src, tgs = get_src_tgs_blocks(blocks, idxs_src, idxs_tgs)
     else:
-        blocks = blocks.flatten(start_dim=-3)
-        src = blocks[..., idxs_src.flatten()].reshape(nc, -1, nsp)
-        tgs = blocks[..., idxs_tgs.flatten()].reshape(nc, -1, idxs_tgs.sum())
+        src = blocks[..., idxs_src].reshape(nc, -1, nsp)
+        tgs = blocks[..., idxs_tgs].reshape(nc, -1, idxs_tgs.sum())
 
     src = src.permute(1,0,-1).reshape(-1, nc*nsp)
     tgs = tgs.permute(1,0,-1).reshape(-1, nc*idxs_tgs.sum())
