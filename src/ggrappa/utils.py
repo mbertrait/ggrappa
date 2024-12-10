@@ -48,15 +48,15 @@ def get_src_tgs_blocks(blocks, idxs_src, idxs_tgs, check_type='acs'):
         samples_per_block = (blocks.sum(dim=0)!=0).sum(dim=(-3, -2, -1))
         locy, locz, locx = torch.nonzero(samples_per_block == idxs_src.numel(), as_tuple=True)
     elif check_type == 'all_sampled_srcs':
-        blocks = blocks.flatten(start_dim=-3)
-        srcs_per_block = blocks[..., idxs_src.flatten()].sum(dim=-1)
-        tgs_per_block = blocks[..., idxs_tgs.flatten()].sum(dim=-1)
+        #TODO: Test if this works
+        srcs_per_block = blocks[..., idxs_src].sum(dim=-1)
+        tgs_per_block = blocks[..., idxs_tgs].sum(dim=-1)
         locy, locz, locx = torch.nonzero(
             (srcs_per_block.abs() == torch.sum(idxs_src)) and (tgs_per_block.abs() < torch.sum(idxs_tgs)),
             as_tuple=True,
         )
-    select_blocks = blocks[:, locy, locz, locx].flatten(start_dim=-3)
-    return select_blocks[..., idxs_src.flatten()], select_blocks[..., idxs_tgs.flatten()]
+    select_blocks = blocks[:, locy, locz, locx]
+    return select_blocks[..., idxs_src], select_blocks[..., idxs_tgs]
 
 def get_grappa_filled_data_and_loc(sig, rec, params):
     rec[:, np.abs(sig).sum(axis=0)!=0] = 0
